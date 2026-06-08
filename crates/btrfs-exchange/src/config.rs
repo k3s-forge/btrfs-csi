@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DurationSeconds};
 use std::time::Duration;
 use toml;
 
 /// Exchange engine configuration
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExchangeConfig {
     /// Node identifier (auto-generated if empty)
@@ -24,12 +26,15 @@ pub struct ExchangeConfig {
     pub seed_nodes: Vec<String>,
 
     /// Gossip interval
+    #[serde_as(as = "DurationSeconds<String>")]
     pub gossip_interval: Duration,
 
     /// Heartbeat interval
+    #[serde_as(as = "DurationSeconds<String>")]
     pub heartbeat_interval: Duration,
 
     /// Node timeout (mark as failed)
+    #[serde_as(as = "DurationSeconds<String>")]
     pub node_timeout: Duration,
 
     /// Replication settings
@@ -40,12 +45,14 @@ pub struct ExchangeConfig {
 }
 
 /// Replication configuration
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplicationConfig {
     /// Default replica count
     pub default_replica_count: u32,
 
     /// Default replication interval
+    #[serde_as(as = "DurationSeconds<String>")]
     pub default_interval: Duration,
 
     /// Maximum concurrent replications
@@ -65,6 +72,7 @@ pub struct ReplicationConfig {
 }
 
 /// Database-specific configuration
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatabaseConfig {
     /// Enable database-aware replication
@@ -74,6 +82,7 @@ pub struct DatabaseConfig {
     pub sqlite_wal_mode: bool,
 
     /// WAL checkpoint interval
+    #[serde_as(as = "DurationSeconds<String>")]
     pub checkpoint_interval: Duration,
 
     /// Enable NOCOW for database volumes
