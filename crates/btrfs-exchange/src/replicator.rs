@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use btrfs_ops::snapshot::{Snapshot, SnapshotManager};
 use btrfs_ops::subvolume::SubvolumeManager;
-use btrfs_protocol::message::{MessageType, SendCompleteResponse, SendStartRequest};
+use btrfs_protocol::message::{Message, MessageType, SendCompleteResponse, SendStartRequest};
 use btrfs_protocol::transport::TcpTransport;
 use std::collections::HashMap;
 use std::net::SocketAddr;
