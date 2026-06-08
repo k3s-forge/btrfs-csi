@@ -364,23 +364,41 @@ jobs:
     - name: Start CSI driver
       run: |
         cat > /tmp/csi-config.toml <<'CSIEOF'
-        [node]
         node_id = "test-node-1"
         listen_addr = "0.0.0.0"
         listen_port = 9200
         zone = "dc1"
         auth_key = "test-key-12345678901234567890123456789012"
         seed_nodes = []
+        gossip_interval = "10s"
+        heartbeat_interval = "30s"
+        node_timeout = "90s"
         
         [replication]
         default_replica_count = 1
-        default_interval = 60
+        default_interval = "30s"
+        max_concurrent = 4
         data_dir = "/mnt/csi-data"
         snapshot_dir = "/mnt/csi-snapshots"
         enable_incremental = true
         
+        [replication.database]
+        enabled = false
+        sqlite_wal_mode = true
+        checkpoint_interval = "30s"
+        enable_nocow = false
+        
         [maintenance]
         enabled = false
+        balance_schedule = "0 2 * * *"
+        balance_threshold = 0.7
+        scrub_schedule = "0 3 * * 0"
+        snapshot_cleanup_schedule = "0 4 * * *"
+        
+        [maintenance.snapshot_retention]
+        daily = 7
+        weekly = 4
+        monthly = 3
         CSIEOF
         
         echo "Starting CSI driver on port 9201..."
