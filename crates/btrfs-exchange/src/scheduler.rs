@@ -139,10 +139,3 @@ impl Clone for ReplicaScheduler {
         }
     }
 }
-
-impl Clone for UsageManager {
-    fn clone(&self) -> Self {
-        // UsageManager doesn't have any state that needs deep cloning
-        Self::new(&self.base_path)
-    }
-}
