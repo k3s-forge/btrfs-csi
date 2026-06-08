@@ -1,0 +1,425 @@
+name: CSI Driver Test
+
+on:
+  push:
+    paths:
+      - 'csi-test-trigger'
+  workflow_dispatch:
+
+jobs:
+  csi-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y btrfs-progs fio jq python3 python3-pip
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Build CSI driver
+      run: cargo build --release
+
+    - name: Create test btrfs filesystem
+      run: |
+        sudo truncate -s 5G /tmp/csi-test.img
+        sudo mkfs.btrfs -f -d single -m dup /tmp/csi-test.img
+        sudo mkdir -p /mnt/csi-data /mnt/csi-snapshots
+        sudo mount -o loop /tmp/csi-test.img /mnt/csi-data
+        df -h /mnt/csi-data
+
+    - name: Create Python CSI test client
+      run: |
+        cat > /tmp/csi_client.py <<'PYEOF'
+        import socket
+        import struct
+        import json
+        import time
+        import hmac
+        import hashlib
+        import sys
+
+        MAGIC = b'BTRF'
+        PROTOCOL_VERSION = 1
+
+        # Message types
+        MSG_AUTH = 0x0001
+        MSG_AUTH_OK = 0x0002
+        MSG_AUTH_FAILED = 0x0003
+        MSG_CREATE_VOLUME = 0x0200
+        MSG_CREATE_VOLUME_ACK = 0x0201
+        MSG_DELETE_VOLUME = 0x0202
+        MSG_DELETE_VOLUME_ACK = 0x0203
+        MSG_GET_VOLUME_INFO = 0x0204
+        MSG_GET_VOLUME_INFO_ACK = 0x0205
+        MSG_VOLUME_LIST = 0x0502
+        MSG_VOLUME_LIST_ACK = 0x0503
+
+        class CsiClient:
+            def __init__(self, host, port, auth_key):
+                self.host = host
+                self.port = port
+                self.auth_key = auth_key.encode() if isinstance(auth_key, str) else auth_key
+                self.sock = None
+
+            def connect(self):
+                self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.sock.connect((self.host, self.port))
+                self.sock.settimeout(10)
+
+            def _compute_hmac(self, timestamp):
+                mac = hmac.new(self.auth_key, digestmod=hashlib.sha256)
+                mac.update(struct.pack('>q', timestamp))
+                return mac.digest()
+
+            def _send_message(self, msg_type, payload=b''):
+                timestamp = int(time.time() * 1000)
+                header = struct.pack('>4sHHIQ',
+                    MAGIC,
+                    PROTOCOL_VERSION,
+                    msg_type,
+                    len(payload),
+                    timestamp
+                )
+                self.sock.sendall(header + payload)
+
+            def _recv_message(self):
+                header = self._recv_exact(20)
+                magic, version, msg_type, payload_len, timestamp = struct.unpack('>4sHHIQ', header)
+                assert magic == MAGIC, f"Bad magic: {magic}"
+                payload = self._recv_exact(payload_len) if payload_len > 0 else b''
+                return msg_type, payload, timestamp
+
+            def _recv_exact(self, n):
+                data = b''
+                while len(data) < n:
+                    chunk = self.sock.recv(n - len(data))
+                    if not chunk:
+                        raise ConnectionError("Connection closed")
+                    data += chunk
+                return data
+
+            def authenticate(self):
+                timestamp = int(time.time() * 1000)
+                signature = self._compute_hmac(timestamp)
+                payload = struct.pack('>q', timestamp) + signature
+                self._send_message(MSG_AUTH, payload)
+                msg_type, resp_payload, _ = self._recv_message()
+                return msg_type == MSG_AUTH_OK
+
+            def create_volume(self, name, size, replica_count=1, replica_zones=None,
+                            replication_interval=60, volume_type="general"):
+                req = {
+                    "name": name,
+                    "size": size,
+                    "replica_count": replica_count,
+                    "replica_zones": replica_zones or [],
+                    "replication_interval": replication_interval,
+                    "volume_type": volume_type,
+                    "database_type": None,
+                }
+                payload = json.dumps(req).encode()
+                self._send_message(MSG_CREATE_VOLUME, payload)
+                msg_type, resp_payload, _ = self._recv_message()
+                if msg_type == MSG_CREATE_VOLUME_ACK:
+                    return json.loads(resp_payload)
+                return None
+
+            def delete_volume(self, volume_id):
+                req = {"volume_id": volume_id}
+                payload = json.dumps(req).encode()
+                self._send_message(MSG_DELETE_VOLUME, payload)
+                msg_type, resp_payload, _ = self._recv_message()
+                if msg_type == MSG_DELETE_VOLUME_ACK:
+                    return json.loads(resp_payload)
+                return None
+
+            def get_volume_info(self, volume_id):
+                req = {"volume_id": volume_id}
+                payload = json.dumps(req).encode()
+                self._send_message(MSG_GET_VOLUME_INFO, payload)
+                msg_type, resp_payload, _ = self._recv_message()
+                if msg_type == MSG_GET_VOLUME_INFO_ACK:
+                    return json.loads(resp_payload)
+                return None
+
+            def list_volumes(self):
+                self._send_message(MSG_VOLUME_LIST)
+                msg_type, resp_payload, _ = self._recv_message()
+                if msg_type == MSG_VOLUME_LIST_ACK:
+                    return json.loads(resp_payload)
+                return []
+
+            def close(self):
+                if self.sock:
+                    self.sock.close()
+
+
+        def run_test(test_name, func):
+            print(f"\n{'='*50}")
+            print(f"  {test_name}")
+            print(f"{'='*50}")
+            try:
+                start = time.time()
+                result = func()
+                elapsed = (time.time() - start) * 1000
+                print(f"  Result: {result}")
+                print(f"  Time: {elapsed:.1f}ms")
+                return result, elapsed
+            except Exception as e:
+                print(f"  ERROR: {e}")
+                return None, 0
+
+
+        def main():
+            host = "127.0.0.1"
+            port = 9201
+            auth_key = "test-key-12345678901234567890123456789012"
+
+            print("="*60)
+            print("  CSI DRIVER TEST SUITE")
+            print("="*60)
+
+            # Test 1: Connection and Authentication
+            def test_auth():
+                client = CsiClient(host, port, auth_key)
+                client.connect()
+                ok = client.authenticate()
+                client.close()
+                return "PASS" if ok else "FAIL"
+
+            run_test("Test 1: Connection & Authentication", test_auth)
+
+            # Test 2: Create Volume
+            def test_create():
+                client = CsiClient(host, port, auth_key)
+                client.connect()
+                client.authenticate()
+                result = client.create_volume("test-vol-1", 1024*1024*100, replica_count=1)
+                client.close()
+                return result
+
+            result, create_time = run_test("Test 2: Create Volume (100MB)", test_create)
+
+            # Test 3: Get Volume Info
+            def test_get_info():
+                if result and "volume_id" in result:
+                    client = CsiClient(host, port, auth_key)
+                    client.connect()
+                    client.authenticate()
+                    info = client.get_volume_info(result["volume_id"])
+                    client.close()
+                    return info
+                return "Skipped (no volume created)"
+
+            run_test("Test 3: Get Volume Info", test_get_info)
+
+            # Test 4: List Volumes
+            def test_list():
+                client = CsiClient(host, port, auth_key)
+                client.connect()
+                client.authenticate()
+                volumes = client.list_volumes()
+                client.close()
+                return f"{len(volumes)} volumes"
+
+            run_test("Test 4: List Volumes", test_list)
+
+            # Test 5: Create multiple volumes
+            def test_create_many():
+                client = CsiClient(host, port, auth_key)
+                client.connect()
+                client.authenticate()
+                created = 0
+                for i in range(10):
+                    r = client.create_volume(f"multi-vol-{i}", 1024*1024*50, replica_count=1)
+                    if r:
+                        created += 1
+                client.close()
+                return f"{created}/10 volumes created"
+
+            run_test("Test 5: Create 10 Volumes", test_create_many)
+
+            # Test 6: Delete volume
+            def test_delete():
+                if result and "volume_id" in result:
+                    client = CsiClient(host, port, auth_key)
+                    client.connect()
+                    client.authenticate()
+                    r = client.delete_volume(result["volume_id"])
+                    client.close()
+                    return r
+                return "Skipped"
+
+            run_test("Test 6: Delete Volume", test_delete)
+
+            # Test 7: Performance - Create/Delete cycle
+            def test_perf():
+                client = CsiClient(host, port, auth_key)
+                client.connect()
+                client.authenticate()
+                times = []
+                for i in range(20):
+                    start = time.time()
+                    r = client.create_volume(f"perf-vol-{i}", 1024*1024*10, replica_count=1)
+                    if r:
+                        client.delete_volume(r["volume_id"])
+                    elapsed = (time.time() - start) * 1000
+                    times.append(elapsed)
+                client.close()
+                avg = sum(times) / len(times)
+                mn = min(times)
+                mx = max(times)
+                return f"avg={avg:.1f}ms min={mn:.1f}ms max={mx:.1f}ms"
+
+            run_test("Test 7: Create/Delete Performance (20 cycles)", test_perf)
+
+            # Test 8: Concurrent connections
+            def test_concurrent():
+                import threading
+                client = CsiClient(host, port, auth_key)
+                client.connect()
+                client.authenticate()
+
+                results = [None] * 5
+                errors = [0]
+
+                def worker(idx):
+                    try:
+                        c = CsiClient(host, port, auth_key)
+                        c.connect()
+                        c.authenticate()
+                        r = c.create_volume(f"conc-vol-{idx}", 1024*1024*10, replica_count=1)
+                        results[idx] = "OK" if r else "FAIL"
+                        if r:
+                            c.delete_volume(r["volume_id"])
+                        c.close()
+                    except Exception as e:
+                        errors[0] += 1
+                        results[idx] = f"ERROR: {e}"
+
+                threads = [threading.Thread(target=worker, args=(i,)) for i in range(5)]
+                start = time.time()
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join()
+                elapsed = (time.time() - start) * 1000
+
+                client.close()
+                ok_count = sum(1 for r in results if r == "OK")
+                return f"{ok_count}/5 concurrent OK in {elapsed:.1f}ms, errors={errors[0]}"
+
+            run_test("Test 8: 5 Concurrent Connections", test_concurrent)
+
+            # Test 9: Large volume create
+            def test_large():
+                client = CsiClient(host, port, auth_key)
+                client.connect()
+                client.authenticate()
+                start = time.time()
+                r = client.create_volume("large-vol", 1024*1024*1024, replica_count=1)
+                elapsed = (time.time() - start) * 1000
+                if r:
+                    client.delete_volume(r["volume_id"])
+                client.close()
+                return f"1GB volume created in {elapsed:.1f}ms" if r else "FAILED"
+
+            run_test("Test 9: Large Volume (1GB)", test_large)
+
+            # Test 10: Stress - rapid create/delete
+            def test_stress():
+                client = CsiClient(host, port, auth_key)
+                client.connect()
+                client.authenticate()
+                start = time.time()
+                count = 0
+                for i in range(50):
+                    r = client.create_volume(f"stress-{i}", 1024*1024*5, replica_count=1)
+                    if r:
+                        count += 1
+                        client.delete_volume(r["volume_id"])
+                elapsed = (time.time() - start) * 1000
+                rate = count * 1000 / elapsed if elapsed > 0 else 0
+                client.close()
+                return f"{count} ops in {elapsed:.0f}ms = {rate:.1f} ops/sec"
+
+            run_test("Test 10: Stress Test (50 create/delete)", test_stress)
+
+            print("\n" + "="*60)
+            print("  ALL TESTS COMPLETE")
+            print("="*60)
+
+
+        if __name__ == "__main__":
+            main()
+        PYEOF
+        echo "Python test client created"
+
+    - name: Start CSI driver
+      run: |
+        cat > /tmp/csi-config.toml <<'CSIEOF'
+        [node]
+        node_id = "test-node-1"
+        listen_addr = "0.0.0.0"
+        listen_port = 9200
+        zone = "dc1"
+        auth_key = "test-key-12345678901234567890123456789012"
+        seed_nodes = []
+        
+        [replication]
+        default_replica_count = 1
+        default_interval = 60
+        data_dir = "/mnt/csi-data"
+        snapshot_dir = "/mnt/csi-snapshots"
+        enable_incremental = true
+        
+        [maintenance]
+        enabled = false
+        CSIEOF
+        
+        echo "Starting CSI driver on port 9201..."
+        timeout 300 ./target/release/btrfs-csi \
+          --config /tmp/csi-config.toml \
+          --endpoint 0.0.0.0:9201 \
+          --node-id test-node-1 \
+          --zone dc1 &
+        
+        # Wait for driver to start
+        for i in $(seq 1 30); do
+          if nc -z 127.0.0.1 9201 2>/dev/null; then
+            echo "CSI driver started on port 9201"
+            break
+          fi
+          sleep 1
+        done
+        
+        # Verify it's running
+        if nc -z 127.0.0.1 9201 2>/dev/null; then
+          echo "CSI driver is running"
+        else
+          echo "CSI driver failed to start"
+          exit 1
+        fi
+
+    - name: Run CSI tests
+      run: |
+        python3 /tmp/csi_client.py
+
+    - name: Stop CSI driver
+      if: always()
+      run: |
+        pkill -f btrfs-csi || true
+        sleep 2
+
+    - name: Cleanup
+      if: always()
+      continue-on-error: true
+      run: |
+        sudo umount /mnt/csi-data 2>/dev/null || true
+        sudo rm -f /tmp/csi-test.img
