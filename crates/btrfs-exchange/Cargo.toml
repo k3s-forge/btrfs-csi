@@ -1,0 +1,20 @@
+[package]
+name = "btrfs-exchange"
+description = "Exchange engine for btrfs-csi cluster communication and replication"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+btrfs-protocol.workspace = true
+btrfs-ops.workspace = true
+
+tokio.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+rand.workspace = true
+async-trait.workspace = true
+futures.workspace = true
