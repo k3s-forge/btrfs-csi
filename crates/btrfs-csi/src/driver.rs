@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use btrfs_exchange::config::ExchangeConfig;
 use btrfs_exchange::gossip::GossipService;
 use btrfs_exchange::replicator::Replicator;
@@ -50,6 +50,16 @@ impl BtrfsCsiDriver {
     /// Start the driver
     pub async fn start(&self) -> Result<()> {
         info!("Starting Btrfs CSI Driver");
+
+        // Ensure data directories exist
+        std::fs::create_dir_all(&self.config.replication.data_dir)
+            .context("Failed to create data directory")?;
+        std::fs::create_dir_all(&self.config.replication.snapshot_dir)
+            .context("Failed to create snapshot directory")?;
+        info!(
+            "Data dir: {}, Snapshot dir: {}",
+            self.config.replication.data_dir, self.config.replication.snapshot_dir
+        );
 
         // Start gossip service
         self.gossip.start().await?;
