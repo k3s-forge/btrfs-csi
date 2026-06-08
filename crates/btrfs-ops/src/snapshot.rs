@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
@@ -76,7 +76,8 @@ impl SnapshotManager {
 
         BtrfsCommand::run("subvolume", &["delete", &snap_path])
             .await
-            .context("Failed to delete snapshot")
+            .context("Failed to delete snapshot")?;
+        Ok(())
     }
 
     /// Get snapshot information
