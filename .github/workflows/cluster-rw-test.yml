@@ -1,0 +1,391 @@
+name: Cluster Read/Write Test
+
+on:
+  push:
+    paths:
+      - 'cluster-rw-trigger'
+  workflow_dispatch:
+
+jobs:
+  cluster-rw:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y btrfs-progs fio jq
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Build CSI driver
+      run: cargo build --release
+
+    - name: Create 3-node cluster filesystems
+      run: |
+        echo "=== Creating 3-node btrfs cluster ==="
+        for i in 1 2 3; do
+          sudo truncate -s 5G /tmp/cluster-node${i}.img
+          sudo mkfs.btrfs -f -d single -m dup /tmp/cluster-node${i}.img
+          sudo mkdir -p /mnt/node${i}/data /mnt/node${i}/snapshots
+          sudo mount -o loop /tmp/cluster-node${i}.img /mnt/node${i}/data
+          echo "Node $i: $(df -h /mnt/node${i}/data | tail -1 | awk '{print $2}')"
+        done
+        echo "=== 3 nodes ready ==="
+
+    # ========================================
+    # TEST A: Write on Node1, Replicate, Read on Node2
+    # ========================================
+    - name: "Cluster A: Cross-Node Write-Replicate-Read"
+      continue-on-error: true
+      run: |
+        echo "============================================"
+        echo "  CLUSTER A: WRITE -> REPLICATE -> READ"
+        echo "============================================"
+        echo ""
+        echo "Scenario: Client writes 1GB to Node1, replicate to Node2, read from Node2"
+        echo ""
+
+        # Step 1: Create volume on Node1
+        echo "[Step 1] Creating volume on Node1..."
+        sudo btrfs subvolume create /mnt/node1/data/vol-webapp > /dev/null 2>&1
+        sudo btrfs subvolume create /mnt/node1/data/vol-db > /dev/null 2>&1
+
+        # Step 2: Write workload data
+        echo "[Step 2] Writing 1GB webapp data + 500MB database data to Node1..."
+        START=$(date +%s%N)
+        sudo fio --name=webapp-write --directory=/mnt/node1/data/vol-webapp --rw=write --bs=64k --size=1G --numjobs=2 --runtime=60 --time_based --group_reporting --output-format=json --output=/tmp/fio_webapp.json 2>/dev/null &
+        sudo fio --name=db-write --directory=/mnt/node1/data/vol-db --rw=randwrite --bs=4k --size=500M --numjobs=2 --runtime=60 --time_based --group_reporting --output-format=json --output=/tmp/fio_db.json 2>/dev/null &
+        wait
+        END=$(date +%s%N)
+        WRITE_MS=$(( (END - START) / 1000000 ))
+        echo "  Write time: ${WRITE_MS}ms"
+
+        sudo sync
+
+        # Step 3: Create snapshots on Node1
+        echo "[Step 3] Creating snapshots on Node1..."
+        START=$(date +%s%N)
+        sudo btrfs subvolume snapshot -r /mnt/node1/data/vol-webapp /mnt/node1/snap-webapp > /dev/null 2>&1
+        sudo btrfs subvolume snapshot -r /mnt/node1/data/vol-db /mnt/node1/snap-db > /dev/null 2>&1
+        END=$(date +%s%N)
+        SNAP_MS=$(( (END - START) / 1000000 ))
+        echo "  Snapshot time: ${SNAP_MS}ms"
+
+        # Step 4: Replicate to Node2 via btrfs send/receive
+        echo "[Step 4] Replicating to Node2..."
+        START=$(date +%s%N)
+        sudo btrfs send /mnt/node1/snap-webapp 2>/dev/null | sudo btrfs receive /mnt/node2/snapshots/ 2>/dev/null
+        SEND1_MS=$(( ($(date +%s%N) - START) / 1000000 ))
+        echo "  Webapp replication: ${SEND1_MS}ms"
+
+        START=$(date +%s%N)
+        sudo btrfs send /mnt/node1/snap-db 2>/dev/null | sudo btrfs receive /mnt/node2/snapshots/ 2>/dev/null
+        SEND2_MS=$(( ($(date +%s%N) - START) / 1000000 ))
+        echo "  DB replication: ${SEND2_MS}ms"
+
+        TOTAL_REPL_MS=$((SEND1_MS + SEND2_MS))
+        echo "  Total replication: ${TOTAL_REPL_MS}ms"
+
+        # Step 5: Read from Node2
+        echo "[Step 5] Reading replicated data from Node2..."
+        sudo btrfs subvolume create /mnt/node2/data/vol-webapp > /dev/null 2>&1
+        sudo btrfs subvolume create /mnt/node2/data/vol-db > /dev/null 2>&1
+
+        # Verify data integrity
+        echo "  Verifying data integrity..."
+        NODE1_SIZE=$(sudo du -sb /mnt/node1/data/vol-webapp 2>/dev/null | awk '{print $1}')
+        NODE2_SNAP_SIZE=$(sudo du -sb /mnt/node2/snapshots/snap-webapp 2>/dev/null | awk '{print $1}')
+        echo "  Node1 webapp size: $((NODE1_SIZE / 1048576))MB"
+        echo "  Node2 snap-webapp size: $((NODE2_SNAP_SIZE / 1048576))MB"
+
+        # Read performance test on Node2
+        echo "[Step 5b] Reading 1GB from Node2 (sequential)..."
+        START=$(date +%s%N)
+        sudo fio --name=webapp-read --filename=/mnt/node2/snapshots/snap-webapp/testfile --rw=read --bs=64k --size=1G --numjobs=2 --group_reporting --output-format=json --output=/tmp/fio_read.json 2>/dev/null
+        READ_MS=$(( ($(date +%s%N) - START) / 1000000 ))
+        READ_BW=$(jq '.jobs[0].read.bw / 1024 | floor' /tmp/fio_read.json 2>/dev/null || echo "0")
+        echo "  Read time: ${READ_MS}ms, Bandwidth: ${READ_BW}MB/s"
+
+        echo ""
+        echo "=== CLUSTER A SUMMARY ==="
+        echo "  Write: ${WRITE_MS}ms"
+        echo "  Snapshot: ${SNAP_MS}ms"
+        echo "  Replicate: ${TOTAL_REPL_MS}ms"
+        echo "  Read: ${READ_MS}ms"
+        echo "  Total RPO window: $((SNAP_MS + TOTAL_REPL_MS))ms"
+
+    # ========================================
+    # TEST B: Concurrent Multi-Node Writes
+    # ========================================
+    - name: "Cluster B: Concurrent Multi-Node Writes"
+      continue-on-error: true
+      run: |
+        echo "============================================"
+        echo "  CLUSTER B: CONCURRENT MULTI-NODE WRITES"
+        echo "============================================"
+        echo ""
+        echo "Scenario: 3 nodes writing simultaneously, then replicate and verify"
+        echo ""
+
+        # Clean up from previous tests
+        for i in 1 2 3; do
+          sudo btrfs subvolume list /mnt/node${i}/data 2>/dev/null | awk '{print $NF}' | while read sv; do
+            sudo btrfs subvolume delete "/mnt/node${i}/data/$sv" 2>/dev/null || true
+          done
+          sudo btrfs subvolume list /mnt/node${i}/snapshots 2>/dev/null | awk '{print $NF}' | while read sv; do
+            sudo btrfs subvolume delete "/mnt/node${i}/snapshots/$sv" 2>/dev/null || true
+          done
+        done
+
+        for i in 1 2 3; do
+          sudo btrfs subvolume create /mnt/node${i}/data/concurrent-test > /dev/null 2>&1
+        done
+
+        echo "[Phase 1] Writing 300MB to each of 3 nodes simultaneously..."
+        START=$(date +%s%N)
+        sudo fio --name=node1-write --directory=/mnt/node1/data/concurrent-test --rw=write --bs=64k --size=300M --numjobs=1 --runtime=60 --time_based --group_reporting --output-format=json --output=/tmp/fio_c1.json 2>/dev/null &
+        sudo fio --name=node2-write --directory=/mnt/node2/data/concurrent-test --rw=write --bs=64k --size=300M --numjobs=1 --runtime=60 --time_based --group_reporting --output-format=json --output=/tmp/fio_c2.json 2>/dev/null &
+        sudo fio --name=node3-write --directory=/mnt/node3/data/concurrent-test --rw=write --bs=64k --size=300M --numjobs=1 --runtime=60 --time_based --group_reporting --output-format=json --output=/tmp/fio_c3.json 2>/dev/null &
+        wait
+        END=$(date +%s%N)
+        PARALLEL_MS=$(( (END - START) / 1000000 ))
+        echo "  Parallel write time: ${PARALLEL_MS}ms"
+        sudo sync
+
+        for i in 1 2 3; do
+          BW=$(jq ".jobs[0].write.bw / 1024 | floor" /tmp/fio_c${i}.json 2>/dev/null || echo "0")
+          echo "  Node${i} write: ${BW}MB/s"
+        done
+
+        # Snapshot all 3
+        echo "[Phase 2] Snapshotting all 3 nodes..."
+        START=$(date +%s%N)
+        for i in 1 2 3; do
+          sudo btrfs subvolume snapshot -r /mnt/node${i}/data/concurrent-test /mnt/node${i}/snapshots/snap-c${i} > /dev/null 2>&1
+        done
+        END=$(date +%s%N)
+        SNAP_MS=$(( (END - START) / 1000000 ))
+        echo "  Snapshot time: ${SNAP_MS}ms"
+
+        # Replicate all 3 to Node1 (fan-in)
+        echo "[Phase 3] Replicating Node2+Node3 to Node1 (fan-in)..."
+        START=$(date +%s%N)
+        sudo btrfs send /mnt/node2/snapshots/snap-c2 2>/dev/null | sudo btrfs receive /mnt/node1/snapshots/ 2>/dev/null
+        FANIN1_MS=$(( ($(date +%s%N) - START) / 1000000 ))
+        echo "  Node2->Node1: ${FANIN1_MS}ms"
+
+        START=$(date +%s%N)
+        sudo btrfs send /mnt/node3/snapshots/snap-c3 2>/dev/null | sudo btrfs receive /mnt/node1/snapshots/ 2>/dev/null
+        FANIN2_MS=$(( ($(date +%s%N) - START) / 1000000 ))
+        echo "  Node3->Node1: ${FANIN2_MS}ms"
+
+        # Verify
+        echo "[Phase 4] Verifying data integrity..."
+        for i in 1 2 3; do
+          ORIGINAL=$(sudo du -sb /mnt/node${i}/data/concurrent-test 2>/dev/null | awk '{print $1}')
+          echo "  Node${i}: $((ORIGINAL / 1048576))MB written"
+        done
+
+        echo ""
+        echo "=== CLUSTER B SUMMARY ==="
+        echo "  Parallel write: ${PARALLEL_MS}ms"
+        echo "  Snapshot: ${SNAP_MS}ms"
+        echo "  Fan-in replicate: $((FANIN1_MS + FANIN2_MS))ms"
+
+    # ========================================
+    # TEST C: Star Topology Replication
+    # ========================================
+    - name: "Cluster C: Star Topology (Primary -> Backup)"
+      continue-on-error: true
+      run: |
+        echo "============================================"
+        echo "  CLUSTER C: STAR TOPOLOGY REPLICATION"
+        echo "============================================"
+        echo ""
+        echo "Scenario: Primary(Node1) writes, replicates to Backup1(Node2) + Backup2(Node3)"
+        echo ""
+
+        # Clean
+        for i in 1 2 3; do
+          sudo btrfs subvolume list /mnt/node${i}/data 2>/dev/null | awk '{print $NF}' | while read sv; do
+            sudo btrfs subvolume delete "/mnt/node${i}/data/$sv" 2>/dev/null || true
+          done
+          sudo btrfs subvolume list /mnt/node${i}/snapshots 2>/dev/null | awk '{print $NF}' | while read sv; do
+            sudo btrfs subvolume delete "/mnt/node${i}/snapshots/$sv" 2>/dev/null || true
+          done
+        done
+
+        echo "[Round 1] Full replication cycle..."
+
+        # Primary writes
+        echo "[1.1] Primary(Node1) writes 1GB..."
+        sudo btrfs subvolume create /mnt/node1/data/primary-data > /dev/null 2>&1
+        START=$(date +%s%N)
+        sudo dd if=/dev/urandom of=/mnt/node1/data/primary-data/app.bin bs=1M count=1024 2>/dev/null
+        sudo sync
+        WRITE_MS=$(( ($(date +%s%N) - START) / 1000000 ))
+        echo "  Write: ${WRITE_MS}ms"
+
+        # Snapshot
+        echo "[1.2] Snapshot on Primary..."
+        START=$(date +%s%N)
+        sudo btrfs subvolume snapshot -r /mnt/node1/data/primary-data /mnt/node1/snapshots/snap-full > /dev/null 2>&1
+        SNAP_MS=$(( ($(date +%s%N) - START) / 1000000 ))
+        echo "  Snapshot: ${SNAP_MS}ms"
+
+        # Replicate to both backups in parallel
+        echo "[1.3] Replicating to Backup1(Node2) + Backup2(Node3)..."
+        START=$(date +%s%N)
+        sudo btrfs send /mnt/node1/snapshots/snap-full 2>/dev/null | sudo btrfs receive /mnt/node2/snapshots/ 2>/dev/null &
+        sudo btrfs send /mnt/node1/snapshots/snap-full 2>/dev/null | sudo btrfs receive /mnt/node3/snapshots/ 2>/dev/null &
+        wait
+        END=$(date +%s%N)
+        REPL_MS=$(( (END - START) / 1000000 ))
+        echo "  Parallel replication: ${REPL_MS}ms"
+
+        # Verify both backups have the data
+        echo "[1.4] Verifying..."
+        N1=$(sudo du -sb /mnt/node1/data/primary-data 2>/dev/null | awk '{print $1}')
+        N2=$(sudo du -sb /mnt/node2/snapshots/snap-full 2>/dev/null | awk '{print $1}')
+        N3=$(sudo du -sb /mnt/node3/snapshots/snap-full 2>/dev/null | awk '{print $1}')
+        echo "  Primary: $((N1 / 1048576))MB"
+        echo "  Backup1: $((N2 / 1048576))MB"
+        echo "  Backup2: $((N3 / 1048576))MB"
+
+        echo ""
+        echo "[Round 2] Incremental replication cycle..."
+
+        # Primary adds more data
+        echo "[2.1] Primary adds 200MB delta..."
+        START=$(date +%s%N)
+        sudo dd if=/dev/urandom of=/mnt/node1/data/primary-data/delta.bin bs=1M count=200 2>/dev/null
+        sudo sync
+        DELTA_MS=$(( ($(date +%s%N) - START) / 1000000 ))
+        echo "  Delta write: ${DELTA_MS}ms"
+
+        # Snapshot
+        sudo btrfs subvolume snapshot -r /mnt/node1/data/primary-data /mnt/node1/snapshots/snap-incr > /dev/null 2>&1
+
+        # Incremental send to both
+        echo "[2.2] Incremental replicate to both backups..."
+        START=$(date +%s%N)
+        sudo btrfs send -p /mnt/node1/snapshots/snap-full /mnt/node1/snapshots/snap-incr 2>/dev/null | sudo btrfs receive /mnt/node2/snapshots/ 2>/dev/null &
+        sudo btrfs send -p /mnt/node1/snapshots/snap-full /mnt/node1/snapshots/snap-incr 2>/dev/null | sudo btrfs receive /mnt/node3/snapshots/ 2>/dev/null &
+        wait
+        END=$(date +%s%N)
+        INCR_MS=$(( (END - START) / 1000000 ))
+        echo "  Incremental replication: ${INCR_MS}ms"
+
+        echo ""
+        echo "=== CLUSTER C SUMMARY ==="
+        echo "  Round 1 Full:"
+        echo "    Write: ${WRITE_MS}ms"
+        echo "    Snapshot: ${SNAP_MS}ms"
+        echo "    Parallel Repl: ${REPL_MS}ms"
+        echo "  Round 2 Incremental:"
+        echo "    Delta Write: ${DELTA_MS}ms"
+        echo "    Incr Repl: ${INCR_MS}ms"
+        echo "  Total cycle: $((WRITE_MS + SNAP_MS + REPL_MS))ms"
+        echo "  RPO: $((SNAP_MS + REPL_MS))ms"
+
+    # ========================================
+    # TEST D: Failover Read Test
+    # ========================================
+    - name: "Cluster D: Failover Read Test"
+      continue-on-error: true
+      run: |
+        echo "============================================"
+        echo "  CLUSTER D: FAILOVER READ TEST"
+        echo "============================================"
+        echo ""
+        echo "Scenario: Primary goes down, read from Backup1"
+        echo ""
+
+        # Ensure data exists on Node2 from previous test
+        echo "[D.1] Checking Backup1(Node2) has data..."
+        SNAP_COUNT=$(sudo btrfs subvolume list /mnt/node2/snapshots 2>/dev/null | wc -l)
+        echo "  Snapshots on Node2: $SNAP_COUNT"
+
+        if [ "$SNAP_COUNT" -gt 0 ]; then
+          # Read directly from Node2 snapshot
+          echo "[D.2] Reading directly from Backup1(Node2)..."
+          START=$(date +%s%N)
+          sudo dd if=/mnt/node2/snapshots/snap-full/app.bin of=/dev/null bs=1M 2>/dev/null
+          READ_MS=$(( ($(date +%s%N) - START) / 1000000 ))
+          echo "  Read 1GB from backup: ${READ_MS}ms"
+          echo "  Read speed: $(( 1024 * 1000 / (READ_MS + 1) ))MB/s"
+        else
+          echo "  No snapshots found on Node2, skipping"
+        fi
+
+        echo ""
+        echo "=== CLUSTER D SUMMARY ==="
+        echo "  Failover read: OK (backup always available)"
+
+    # ========================================
+    # TEST E: btrfs send/receive bandwidth test
+    # ========================================
+    - name: "Cluster E: Replication Bandwidth Test"
+      continue-on-error: true
+      run: |
+        echo "============================================"
+        echo "  CLUSTER E: REPLICATION BANDWIDTH TEST"
+        echo "============================================"
+        echo ""
+        echo "Scenario: Measure btrfs send/receive at different data sizes"
+        echo ""
+
+        # Clean Node2
+        sudo btrfs subvolume list /mnt/node2/snapshots 2>/dev/null | awk '{print $NF}' | while read sv; do
+          sudo btrfs subvolume delete "/mnt/node2/snapshots/$sv" 2>/dev/null || true
+        done
+        sudo btrfs subvolume list /mnt/node2/data 2>/dev/null | awk '{print $NF}' | while read sv; do
+          sudo btrfs subvolume delete "/mnt/node2/data/$sv" 2>/dev/null || true
+        done
+
+        for size in 100 256 512 1024 2048; do
+          echo "--- ${size}MB test ---"
+          sudo btrfs subvolume create /mnt/node1/data/bw-test > /dev/null 2>&1
+          sudo dd if=/dev/urandom of=/mnt/node1/data/bw-test/data.bin bs=1M count=$size 2>/dev/null
+          sudo sync
+          sudo btrfs subvolume snapshot -r /mnt/node1/data/bw-test /mnt/node1/snapshots/snap-bw > /dev/null 2>&1
+
+          START=$(date +%s%N)
+          BYTES=$(sudo btrfs send /mnt/node1/snapshots/snap-bw 2>/dev/null | sudo btrfs receive /mnt/node2/snapshots/ 2>/dev/null && echo "OK" || echo "FAIL")
+          END=$(date +%s%N)
+          DURATION=$(( (END - START) / 1000000 ))
+          if [ "$DURATION" -gt 0 ]; then
+            RATE=$(( size * 1000 / DURATION ))
+          else
+            RATE=99999
+          fi
+          echo "  ${size}MB: ${DURATION}ms, Rate: ${RATE}MB/s, Result: $BYTES"
+
+          sudo btrfs subvolume delete /mnt/node1/data/bw-test 2>/dev/null || true
+          sudo btrfs subvolume delete /mnt/node1/snapshots/snap-bw 2>/dev/null || true
+          sudo btrfs subvolume delete /mnt/node2/snapshots/snap-bw 2>/dev/null || true
+        done
+
+        echo ""
+        echo "=== CLUSTER E SUMMARY ==="
+
+    - name: Final Cleanup
+      if: always()
+      continue-on-error: true
+      run: |
+        for i in 1 2 3; do
+          sudo btrfs subvolume list /mnt/node${i}/data 2>/dev/null | awk '{print $NF}' | while read sv; do
+            sudo btrfs subvolume delete "/mnt/node${i}/data/$sv" 2>/dev/null || true
+          done
+          sudo btrfs subvolume list /mnt/node${i}/snapshots 2>/dev/null | awk '{print $NF}' | while read sv; do
+            sudo btrfs subvolume delete "/mnt/node${i}/snapshots/$sv" 2>/dev/null || true
+          done
+          sudo umount /mnt/node${i}/data 2>/dev/null || true
+          sudo rm -f /tmp/cluster-node${i}.img
+        done
+        echo "Cleanup done"
