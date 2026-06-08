@@ -1,0 +1,75 @@
+version: '3.8'
+
+services:
+  node1:
+    build:
+      context: ..
+      dockerfile: docker/test/Dockerfile.node
+    container_name: btrfs-node1
+    hostname: node1
+    privileged: true
+    networks:
+      btrfs-net:
+        ipv4_address: 172.20.0.11
+    ports:
+      - "4646:4646"
+      - "9201:9201"
+    volumes:
+      - ../../:/home/vagrant/btrfs-csi
+    command: >
+      bash -c "
+        consul agent -dev -bind=172.20.0.11 -client=0.0.0.0 &
+        sleep 3
+        nomad agent -dev -config=/etc/nomad.d/ -bind=172.20.0.11 &
+        sleep 5
+        tail -f /dev/null
+      "
+
+  node2:
+    build:
+      context: ..
+      dockerfile: docker/test/Dockerfile.node
+    container_name: btrfs-node2
+    hostname: node2
+    privileged: true
+    networks:
+      btrfs-net:
+        ipv4_address: 172.20.0.12
+    volumes:
+      - ../../:/home/vagrant/btrfs-csi
+    command: >
+      bash -c "
+        consul agent -dev -bind=172.20.0.12 -client=0.0.0.0 &
+        sleep 3
+        nomad agent -dev -config=/etc/nomad.d/ -bind=172.20.0.12 &
+        sleep 5
+        tail -f /dev/null
+      "
+
+  node3:
+    build:
+      context: ..
+      dockerfile: docker/test/Dockerfile.node
+    container_name: btrfs-node3
+    hostname: node3
+    privileged: true
+    networks:
+      btrfs-net:
+        ipv4_address: 172.20.0.13
+    volumes:
+      - ../../:/home/vagrant/btrfs-csi
+    command: >
+      bash -c "
+        consul agent -dev -bind=172.20.0.13 -client=0.0.0.0 &
+        sleep 3
+        nomad agent -dev -config=/etc/nomad.d/ -bind=172.20.0.13 &
+        sleep 5
+        tail -f /dev/null
+      "
+
+networks:
+  btrfs-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
