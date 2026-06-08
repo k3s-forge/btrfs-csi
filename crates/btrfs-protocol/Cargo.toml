@@ -1,0 +1,18 @@
+[package]
+name = "btrfs-protocol"
+description = "Communication protocol for btrfs-csi cluster"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio.workspace = true
+bytes.workspace = true
+serde.workspace = true
+bincode.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+rand.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+blake3.workspace = true
