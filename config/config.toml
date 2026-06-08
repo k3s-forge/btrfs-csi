@@ -1,0 +1,87 @@
+# Btrfs CSI Configuration
+
+[node]
+# Node identifier (auto-generated if empty)
+node_id = ""
+
+# Listen address for incoming connections
+listen_addr = "0.0.0.0"
+
+# Listen port for transport
+listen_port = 9200
+
+# Zone/region for topology
+zone = "dc1"
+
+# Authentication key (generate with: openssl rand -hex 32)
+auth_key = ""
+
+# Seed nodes for initial cluster join
+seed_nodes = []
+
+# Gossip interval (seconds)
+gossip_interval = 10
+
+# Heartbeat interval (seconds)
+heartbeat_interval = 30
+
+# Node timeout (seconds) - mark as failed after this
+node_timeout = 90
+
+[replication]
+# Default replica count
+default_replica_count = 2
+
+# Default replication interval (seconds)
+default_interval = 30
+
+# Maximum concurrent replications
+max_concurrent = 4
+
+# Data directory for volumes
+data_dir = "/mnt/data"
+
+# Snapshot directory
+snapshot_dir = "/mnt/snapshots"
+
+# Enable incremental replication
+enable_incremental = true
+
+[replication.database]
+# Enable database-aware replication
+enabled = true
+
+# SQLite WAL mode
+sqlite_wal_mode = true
+
+# WAL checkpoint interval (seconds)
+checkpoint_interval = 30
+
+# Enable NOCOW for database volumes
+enable_nocow = false
+
+[maintenance]
+# Enable automatic maintenance
+enabled = true
+
+# Balance schedule (cron expression)
+balance_schedule = "0 2 * * *"
+
+# Balance threshold (0.0 - 1.0)
+balance_threshold = 0.7
+
+# Scrub schedule (cron expression)
+scrub_schedule = "0 3 * * 0"
+
+# Snapshot cleanup schedule
+snapshot_cleanup_schedule = "0 4 * * *"
+
+[maintenance.snapshot_retention]
+# Daily snapshots to keep
+daily = 7
+
+# Weekly snapshots to keep
+weekly = 4
+
+# Monthly snapshots to keep
+monthly = 3
