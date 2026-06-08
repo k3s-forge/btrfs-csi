@@ -172,7 +172,8 @@ jobs:
       run: |
         echo "=== Cleanup ==="
         for i in 1 2 3; do
-          sudo umount /mnt/node${i}/data || true
-          rm -f /tmp/btrfs-node${i}.img
+          sudo umount /mnt/node${i}/data 2>/dev/null || true
+          sudo rm -f /tmp/btrfs-node${i}.img 2>/dev/null || true
         done
         echo "=== Cleanup complete ==="
+      continue-on-error: true
