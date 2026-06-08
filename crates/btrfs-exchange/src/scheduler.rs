@@ -1,5 +1,6 @@
 use anyhow::Result;
 use btrfs_ops::usage::UsageManager;
+use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use crate::config::ExchangeConfig;
@@ -8,13 +9,13 @@ use crate::replicator::Replicator;
 /// Maintenance scheduler for btrfs operations
 pub struct ReplicaScheduler {
     config: ExchangeConfig,
-    replicator: Replicator,
+    replicator: Arc<Replicator>,
     usage_manager: UsageManager,
 }
 
 impl ReplicaScheduler {
     /// Create a new scheduler
-    pub fn new(config: ExchangeConfig, replicator: Replicator) -> Self {
+    pub fn new(config: ExchangeConfig, replicator: Arc<Replicator>) -> Self {
         let usage_manager = UsageManager::new(&config.replication.data_dir);
 
         Self {
