@@ -1,7 +1,8 @@
 use anyhow::Result;
 use btrfs_protocol::message::{Message, MessageType};
-use btrfs_protocol::transport::{TcpTransport, TcpListener, TransportConnection};
+use btrfs_protocol::transport::{TcpTransport, TransportConnection};
 use std::net::SocketAddr;
+use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 
 use crate::driver::BtrfsCsiDriver;
