@@ -106,7 +106,7 @@ impl GossipService {
         peers: Arc<RwLock<HashMap<String, NodeInfo>>>,
         local_volumes: Arc<RwLock<Vec<VolumeInfo>>>,
     ) {
-        let mut interval = tokio::time::interval(config.heartbeat_interval);
+        let mut interval = tokio::time::interval(config.heartbeat_interval_duration());
 
         loop {
             interval.tick().await;
@@ -159,13 +159,13 @@ impl GossipService {
         config: ExchangeConfig,
         peers: Arc<RwLock<HashMap<String, NodeInfo>>>,
     ) {
-        let mut interval = tokio::time::interval(config.node_timeout);
+        let mut interval = tokio::time::interval(config.node_timeout_duration());
 
         loop {
             interval.tick().await;
 
             let now = chrono::Utc::now().timestamp_millis();
-            let timeout = config.node_timeout.as_millis() as i64;
+            let timeout = config.node_timeout * 1000; // Convert seconds to milliseconds
 
             let mut peers = peers.write().await;
             let stale_nodes: Vec<String> = peers
