@@ -29,8 +29,9 @@ pub struct DeviceUsage {
 }
 
 /// Manager for btrfs filesystem usage
+#[derive(Clone)]
 pub struct UsageManager {
-    base_path: String,
+    pub base_path: String,
 }
 
 impl UsageManager {
