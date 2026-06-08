@@ -1,0 +1,23 @@
+[package]
+name = "btrfs-csi"
+description = "CSI driver for btrfs with replication support"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "btrfs-csi"
+path = "src/main.rs"
+
+[dependencies]
+btrfs-protocol.workspace = true
+btrfs-ops.workspace = true
+btrfs-exchange.workspace = true
+
+tokio.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+toml.workspace = true
