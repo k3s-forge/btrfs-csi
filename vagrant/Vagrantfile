@@ -1,0 +1,34 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+NODES = {
+  "node1" => { :ip => "192.168.56.11", :memory => 2048, :cpus => 2, :role => "primary" },
+  "node2" => { :ip => "192.168.56.12", :memory => 2048, :cpus => 2, :role => "replica" },
+  "node3" => { :ip => "192.168.56.13", :memory => 2048, :cpus => 2, :role => "replica" },
+}
+
+Vagrant.configure("2") do |config|
+  config.vm.box = "ubuntu/jammy64"
+
+  NODES.each do |name, node|
+    config.vm.define name do |node_config|
+      node_config.vm.hostname = name
+      node_config.vm.network "private_network", ip: node[:ip]
+
+      # Forward CSI port
+      node_config.vm.network "forwarded_port", guest: 9200, host: 9200 + NODES.keys.index(name)
+      node_config.vm.network "forwarded_port", guest: 9201, host: 9210 + NODES.keys.index(name)
+
+      node_config.vm.provider "virtualbox" do |vb|
+        vb.name = "btrfs-csi-#{name}"
+        vb.memory = node[:memory]
+        vb.cpus = node[:cpus]
+        vb.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
+      end
+
+      node_config.vm.synced_folder "../", "/home/vagrant/btrfs-csi"
+
+      node_config.vm.provision "shell", path: "scripts/setup-node.sh", args: [node[:role], node[:ip]]
+    end
+  end
+end
