@@ -115,7 +115,7 @@ impl ReplicaScheduler {
     }
 
     /// Snapshot cleanup loop
-    async fn snapshot_cleanup_loop(config: ExchangeConfig, replicator: Replicator) {
+    async fn snapshot_cleanup_loop(config: ExchangeConfig, replicator: Arc<Replicator>) {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(86400));
 
         loop {
