@@ -51,7 +51,8 @@ impl SubvolumeManager {
 
         BtrfsCommand::run("subvolume", &["delete", &path])
             .await
-            .context("Failed to delete subvolume")
+            .context("Failed to delete subvolume")?;
+        Ok(())
     }
 
     /// Get subvolume information
