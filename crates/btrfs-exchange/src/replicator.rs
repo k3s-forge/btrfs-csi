@@ -79,7 +79,7 @@ impl Replicator {
         gossip: Arc<GossipService>,
         replicator: Replicator,
     ) {
-        let mut interval = tokio::time::interval(config.replication.default_interval);
+        let mut interval = tokio::time::interval(config.replication.default_interval_duration());
 
         loop {
             interval.tick().await;
@@ -99,7 +99,7 @@ impl Replicator {
     async fn get_volumes_for_replication(&self) -> Vec<String> {
         let states = self.states.read().await;
         let now = chrono::Utc::now().timestamp_millis();
-        let interval = self.config.replication.default_interval.as_millis() as i64;
+        let interval = self.config.replication.default_interval * 1000; // Convert seconds to milliseconds
 
         states
             .iter()
