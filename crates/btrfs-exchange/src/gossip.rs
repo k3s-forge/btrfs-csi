@@ -4,7 +4,6 @@ use btrfs_protocol::transport::TcpTransport;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
