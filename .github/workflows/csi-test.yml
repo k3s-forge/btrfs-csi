@@ -363,43 +363,7 @@ jobs:
 
     - name: Start CSI driver
       run: |
-        cat > /tmp/csi-config.toml <<'CSIEOF'
-node_id = "test-node-1"
-listen_addr = "0.0.0.0"
-listen_port = 9200
-zone = "dc1"
-auth_key = "test-key-12345678901234567890123456789012"
-seed_nodes = []
-gossip_interval = "10s"
-heartbeat_interval = "30s"
-node_timeout = "90s"
-
-[replication]
-default_replica_count = 1
-default_interval = "30s"
-max_concurrent = 4
-data_dir = "/mnt/csi-data"
-snapshot_dir = "/mnt/csi-snapshots"
-enable_incremental = true
-
-[replication.database]
-enabled = false
-sqlite_wal_mode = true
-checkpoint_interval = "30s"
-enable_nocow = false
-
-[maintenance]
-enabled = false
-balance_schedule = "0 2 * * *"
-balance_threshold = 0.7
-scrub_schedule = "0 3 * * 0"
-snapshot_cleanup_schedule = "0 4 * * *"
-
-[maintenance.snapshot_retention]
-daily = 7
-weekly = 4
-monthly = 3
-CSIEOF
+        echo "bm9kZV9pZCA9ICJ0ZXN0LW5vZGUtMSIKbGlzdGVuX2FkZHIgPSAiMC4wLjAuMCIKbGlzdGVuX3BvcnQgPSA5MjAwCnpvbmUgPSAiZGMxIgphdXRoX2tleSA9ICJ0ZXN0LWtleS0xMjM0NTY3ODkwMTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMiIKc2VlZF9ub2RlcyA9IFtdCmdvc3NpcF9pbnRlcnZhbCA9ICIxMHMiCmhlYXJ0YmVhdF9pbnRlcnZhbCA9ICIzMHMiCm5vZGVfdGltZW91dCA9ICI5MHMiCgpbcmVwbGljYXRpb25dCmRlZmF1bHRfcmVwbGljYV9jb3VudCA9IDEKZGVmYXVsdF9pbnRlcnZhbCA9ICIzMHMiCm1heF9jb25jdXJyZW50ID0gNApkYXRhX2RpciA9ICIvbW50L2NzaS1kYXRhIgpzbmFwc2hvdF9kaXIgPSAiL21udC9jc2ktc25hcHNob3RzIgplbmFibGVfaW5jcmVtZW50YWwgPSB0cnVlCgpbcmVwbGljYXRpb24uZGF0YWJhc2VdCmVuYWJsZWQgPSBmYWxzZQpzcWxpdGVfd2FsX21vZGUgPSB0cnVlCmNoZWNrcG9pbnRfaW50ZXJ2YWwgPSAiMzBzIgplbmFibGVfbm9jb3cgPSBmYWxzZQoKW21haW50ZW5hbmNlXQplbmFibGVkID0gZmFsc2UKYmFsYW5jZV9zY2hlZHVsZSA9ICIwIDIgKiAqICoiCmJhbGFuY2VfdGhyZXNob2xkID0gMC43CnNjcnViX3NjaGVkdWxlID0gIjAgMyAqICogMCIKc25hcHNob3RfY2xlYW51cF9zY2hlZHVsZSA9ICIwIDQgKiAqICoiCgpbbWFpbnRlbmFuY2Uuc25hcHNob3RfcmV0ZW50aW9uXQpkYWlseSA9IDcKd2Vla2x5ID0gNAptb250aGx5ID0gMw==" | base64 -d > /tmp/csi-config.toml
         echo "Config created:"
         cat /tmp/csi-config.toml
         
