@@ -35,10 +35,10 @@ jobs:
     - name: Create test environment
       run: |
         # Create btrfs filesystem with maximum size
-        sudo truncate -s 50G /tmp/btrfs-stress.img
-        sudo mkfs.btrfs -f -d single,metadata dup /tmp/btrfs-stress.img
+        sudo truncate -s 10G /tmp/btrfs-stress.img
+        sudo mkfs.btrfs -f -d single -m dup /tmp/btrfs-stress.img
         sudo mkdir -p /mnt/stress/data /mnt/stress/snapshots
-        sudo mount -o loop,compress=no /tmp/btrfs-stress.img /mnt/stress/data
+        sudo mount -o loop /tmp/btrfs-stress.img /mnt/stress/data
         
         echo "Filesystem created:"
         df -h /mnt/stress/data
