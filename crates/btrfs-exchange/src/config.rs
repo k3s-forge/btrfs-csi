@@ -1,10 +1,8 @@
 use serde::{Deserialize, Serialize};
-use serde_with::{serde_as, DurationSeconds};
 use std::time::Duration;
 use toml;
 
 /// Exchange engine configuration
-#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExchangeConfig {
     /// Node identifier (auto-generated if empty)
@@ -25,17 +23,17 @@ pub struct ExchangeConfig {
     /// Seed nodes for initial cluster join
     pub seed_nodes: Vec<String>,
 
-    /// Gossip interval
-    #[serde_as(as = "DurationSeconds<String>")]
-    pub gossip_interval: Duration,
+    /// Gossip interval in seconds
+    #[serde(default = "default_gossip_interval")]
+    pub gossip_interval: u64,
 
-    /// Heartbeat interval
-    #[serde_as(as = "DurationSeconds<String>")]
-    pub heartbeat_interval: Duration,
+    /// Heartbeat interval in seconds
+    #[serde(default = "default_heartbeat_interval")]
+    pub heartbeat_interval: u64,
 
-    /// Node timeout (mark as failed)
-    #[serde_as(as = "DurationSeconds<String>")]
-    pub node_timeout: Duration,
+    /// Node timeout in seconds (mark as failed)
+    #[serde(default = "default_node_timeout")]
+    pub node_timeout: u64,
 
     /// Replication settings
     pub replication: ReplicationConfig,
@@ -44,16 +42,36 @@ pub struct ExchangeConfig {
     pub maintenance: MaintenanceConfig,
 }
 
+fn default_gossip_interval() -> u64 { 10 }
+fn default_heartbeat_interval() -> u64 { 30 }
+fn default_node_timeout() -> u64 { 90 }
+
+impl ExchangeConfig {
+    /// Get gossip interval as Duration
+    pub fn gossip_interval_duration(&self) -> Duration {
+        Duration::from_secs(self.gossip_interval)
+    }
+
+    /// Get heartbeat interval as Duration
+    pub fn heartbeat_interval_duration(&self) -> Duration {
+        Duration::from_secs(self.heartbeat_interval)
+    }
+
+    /// Get node timeout as Duration
+    pub fn node_timeout_duration(&self) -> Duration {
+        Duration::from_secs(self.node_timeout)
+    }
+}
+
 /// Replication configuration
-#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplicationConfig {
     /// Default replica count
     pub default_replica_count: u32,
 
-    /// Default replication interval
-    #[serde_as(as = "DurationSeconds<String>")]
-    pub default_interval: Duration,
+    /// Default replication interval in seconds
+    #[serde(default = "default_replication_interval")]
+    pub default_interval: u64,
 
     /// Maximum concurrent replications
     pub max_concurrent: u32,
@@ -71,8 +89,16 @@ pub struct ReplicationConfig {
     pub database: DatabaseConfig,
 }
 
+fn default_replication_interval() -> u64 { 30 }
+
+impl ReplicationConfig {
+    /// Get default interval as Duration
+    pub fn default_interval_duration(&self) -> Duration {
+        Duration::from_secs(self.default_interval)
+    }
+}
+
 /// Database-specific configuration
-#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatabaseConfig {
     /// Enable database-aware replication
@@ -81,12 +107,21 @@ pub struct DatabaseConfig {
     /// SQLite WAL mode
     pub sqlite_wal_mode: bool,
 
-    /// WAL checkpoint interval
-    #[serde_as(as = "DurationSeconds<String>")]
-    pub checkpoint_interval: Duration,
+    /// WAL checkpoint interval in seconds
+    #[serde(default = "default_checkpoint_interval")]
+    pub checkpoint_interval: u64,
 
     /// Enable NOCOW for database volumes
     pub enable_nocow: bool,
+}
+
+fn default_checkpoint_interval() -> u64 { 30 }
+
+impl DatabaseConfig {
+    /// Get checkpoint interval as Duration
+    pub fn checkpoint_interval_duration(&self) -> Duration {
+        Duration::from_secs(self.checkpoint_interval)
+    }
 }
 
 /// Maintenance configuration
@@ -133,9 +168,9 @@ impl Default for ExchangeConfig {
             zone: "default".to_string(),
             auth_key: String::new(),
             seed_nodes: Vec::new(),
-            gossip_interval: Duration::from_secs(10),
-            heartbeat_interval: Duration::from_secs(30),
-            node_timeout: Duration::from_secs(90),
+            gossip_interval: 10,
+            heartbeat_interval: 30,
+            node_timeout: 90,
             replication: ReplicationConfig::default(),
             maintenance: MaintenanceConfig::default(),
         }
@@ -146,7 +181,7 @@ impl Default for ReplicationConfig {
     fn default() -> Self {
         Self {
             default_replica_count: 2,
-            default_interval: Duration::from_secs(30),
+            default_interval: 30,
             max_concurrent: 4,
             data_dir: "/mnt/data".to_string(),
             snapshot_dir: "/mnt/snapshots".to_string(),
@@ -161,7 +196,7 @@ impl Default for DatabaseConfig {
         Self {
             enabled: true,
             sqlite_wal_mode: true,
-            checkpoint_interval: Duration::from_secs(30),
+            checkpoint_interval: 30,
             enable_nocow: false,
         }
     }
