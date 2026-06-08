@@ -10,11 +10,11 @@ use tracing::info;
 
 /// Main CSI driver implementation
 pub struct BtrfsCsiDriver {
-    config: ExchangeConfig,
-    gossip: Arc<GossipService>,
-    replicator: Arc<Replicator>,
-    volume_manager: Arc<VolumeManager>,
-    scheduler: ReplicaScheduler,
+    pub config: ExchangeConfig,
+    pub gossip: Arc<GossipService>,
+    pub replicator: Arc<Replicator>,
+    pub volume_manager: Arc<VolumeManager>,
+    pub scheduler: ReplicaScheduler,
 }
 
 impl BtrfsCsiDriver {
