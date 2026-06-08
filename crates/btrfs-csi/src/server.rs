@@ -23,13 +23,21 @@ impl CsiServer {
     pub async fn serve(&self) -> Result<()> {
         info!("CSI server starting on {}", self.endpoint);
 
-        // Parse endpoint
-        let addr = if self.endpoint.starts_with("unix://") {
-            // Unix socket - for now, just use TCP
-            warn!("Unix sockets not yet implemented, using TCP");
+        // Parse endpoint - support both TCP and unix socket formats
+        let addr: SocketAddr = if self.endpoint.starts_with("unix://") {
+            // For unix sockets, extract the path and log a warning
+            let path = self.endpoint.trim_start_matches("unix://");
+            warn!(
+                "Unix socket requested ({}), falling back to TCP on port 9201",
+                path
+            );
             "0.0.0.0:9201".parse()?
-        } else {
+        } else if self.endpoint.contains(':') {
+            // TCP endpoint like "0.0.0.0:9201"
             self.endpoint.parse()?
+        } else {
+            // Just a port number
+            format!("0.0.0.0:{}", self.endpoint).parse()?
         };
 
         // Create transport
