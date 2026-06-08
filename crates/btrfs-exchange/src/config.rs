@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use toml;
 
 /// Exchange engine configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
