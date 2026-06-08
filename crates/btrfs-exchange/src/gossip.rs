@@ -165,7 +165,7 @@ impl GossipService {
             interval.tick().await;
 
             let now = chrono::Utc::now().timestamp_millis();
-            let timeout = config.node_timeout * 1000; // Convert seconds to milliseconds
+            let timeout = (config.node_timeout * 1000) as i64; // Convert seconds to milliseconds
 
             let mut peers = peers.write().await;
             let stale_nodes: Vec<String> = peers
