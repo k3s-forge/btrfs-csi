@@ -1,6 +1,9 @@
 name: Stress Test - Find Maximums
 
 on:
+  push:
+    paths:
+      - 'stress-trigger'
   workflow_dispatch:
     inputs:
       test_level:
