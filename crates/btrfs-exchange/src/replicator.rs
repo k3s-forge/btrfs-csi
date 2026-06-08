@@ -99,7 +99,7 @@ impl Replicator {
     async fn get_volumes_for_replication(&self) -> Vec<String> {
         let states = self.states.read().await;
         let now = chrono::Utc::now().timestamp_millis();
-        let interval = self.config.replication.default_interval * 1000; // Convert seconds to milliseconds
+        let interval = (self.config.replication.default_interval * 1000) as i64; // Convert seconds to milliseconds
 
         states
             .iter()
