@@ -394,25 +394,25 @@ jobs:
         echo "=========================================="
         echo ""
         
-        cat > /tmp/csi-test-config.toml <<'CSIEOF'
-[node]
-node_id = "stress-test-node"
-listen_addr = "0.0.0.0"
-listen_port = 9200
-zone = "dc1"
-auth_key = "test-key-12345678901234567890123456789012"
-seed_nodes = []
-
-[replication]
-default_replica_count = 2
-default_interval = 1
-data_dir = "/mnt/stress/data"
-snapshot_dir = "/mnt/stress/snapshots"
-enable_incremental = true
-
-[maintenance]
-enabled = false
-CSIEOF
+        cat > /tmp/csi-test-config.toml <<CSIEOF
+        [node]
+        node_id = "stress-test-node"
+        listen_addr = "0.0.0.0"
+        listen_port = 9200
+        zone = "dc1"
+        auth_key = "test-key-12345678901234567890123456789012"
+        seed_nodes = []
+        
+        [replication]
+        default_replica_count = 2
+        default_interval = 1
+        data_dir = "/mnt/stress/data"
+        snapshot_dir = "/mnt/stress/snapshots"
+        enable_incremental = true
+        
+        [maintenance]
+        enabled = false
+        CSIEOF
         
         echo "CSI binary size:"
         ls -lh ./target/release/btrfs-csi
