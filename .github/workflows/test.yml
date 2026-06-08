@@ -59,16 +59,16 @@ jobs:
     - name: Test large data write
       run: |
         echo "=== Writing 1GB test data ==="
-        dd if=/dev/urandom of=/mnt/btrfs-data/test-1gb.bin bs=1M count=1024
-        sync
+        sudo dd if=/dev/urandom of=/mnt/btrfs-data/test-1gb.bin bs=1M count=1024
+        sudo sync
         
         echo "=== Creating snapshot ==="
         sudo btrfs subvolume snapshot -r /mnt/btrfs-data /mnt/btrfs-snapshots/snap-1
         ls -la /mnt/btrfs-snapshots/
         
         echo "=== Writing more data ==="
-        dd if=/dev/urandom of=/mnt/btrfs-data/test-2gb.bin bs=1M count=1024
-        sync
+        sudo dd if=/dev/urandom of=/mnt/btrfs-data/test-2gb.bin bs=1M count=1024
+        sudo sync
         
         echo "=== Creating incremental snapshot ==="
         sudo btrfs subvolume snapshot -r /mnt/btrfs-data /mnt/btrfs-snapshots/snap-2
