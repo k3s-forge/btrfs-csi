@@ -363,12 +363,12 @@ jobs:
 
     - name: Start CSI driver
       run: |
-        echo "bm9kZV9pZCA9ICJ0ZXN0LW5vZGUtMSIKbGlzdGVuX2FkZHIgPSAiMC4wLjAuMCIKbGlzdGVuX3BvcnQgPSA5MjAwCnpvbmUgPSAiZGMxIgphdXRoX2tleSA9ICJ0ZXN0LWtleS0xMjM0NTY3ODkwMTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMiIKc2VlZF9ub2RlcyA9IFtdCmdvc3NpcF9pbnRlcnZhbCA9ICIxMHMiCmhlYXJ0YmVhdF9pbnRlcnZhbCA9ICIzMHMiCm5vZGVfdGltZW91dCA9ICI5MHMiCgpbcmVwbGljYXRpb25dCmRlZmF1bHRfcmVwbGljYV9jb3VudCA9IDEKZGVmYXVsdF9pbnRlcnZhbCA9ICIzMHMiCm1heF9jb25jdXJyZW50ID0gNApkYXRhX2RpciA9ICIvbW50L2NzaS1kYXRhIgpzbmFwc2hvdF9kaXIgPSAiL21udC9jc2ktc25hcHNob3RzIgplbmFibGVfaW5jcmVtZW50YWwgPSB0cnVlCgpbcmVwbGljYXRpb24uZGF0YWJhc2VdCmVuYWJsZWQgPSBmYWxzZQpzcWxpdGVfd2FsX21vZGUgPSB0cnVlCmNoZWNrcG9pbnRfaW50ZXJ2YWwgPSAiMzBzIgplbmFibGVfbm9jb3cgPSBmYWxzZQoKW21haW50ZW5hbmNlXQplbmFibGVkID0gZmFsc2UKYmFsYW5jZV9zY2hlZHVsZSA9ICIwIDIgKiAqICoiCmJhbGFuY2VfdGhyZXNob2xkID0gMC43CnNjcnViX3NjaGVkdWxlID0gIjAgMyAqICogMCIKc25hcHNob3RfY2xlYW51cF9zY2hlZHVsZSA9ICIwIDQgKiAqICoiCgpbbWFpbnRlbmFuY2Uuc25hcHNob3RfcmV0ZW50aW9uXQpkYWlseSA9IDcKd2Vla2x5ID0gNAptb250aGx5ID0gMw==" | base64 -d > /tmp/csi-config.toml
+        echo "bm9kZV9pZCA9ICJ0ZXN0LW5vZGUtMSIKbGlzdGVuX2FkZHIgPSAiMC4wLjAuMCIKbGlzdGVuX3BvcnQgPSA5MjAwCnpvbmUgPSAiZGMxIgphdXRoX2tleSA9ICJ0ZXN0LWtleS0xMjM0NTY3ODkwMTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMiIKc2VlZF9ub2RlcyA9IFtdCmdvc3NpcF9pbnRlcnZhbCA9IDEwCmhlYXJ0YmVhdF9pbnRlcnZhbCA9IDMwCm5vZGVfdGltZW91dCA9IDkwCgpbcmVwbGljYXRpb25dCmRlZmF1bHRfcmVwbGljYV9jb3VudCA9IDEKZGVmYXVsdF9pbnRlcnZhbCA9IDMwCm1heF9jb25jdXJyZW50ID0gNApkYXRhX2RpciA9ICIvbW50L2NzaS1kYXRhIgpzbmFwc2hvdF9kaXIgPSAiL21udC9jc2ktc25hcHNob3RzIgplbmFibGVfaW5jcmVtZW50YWwgPSB0cnVlCgpbcmVwbGljYXRpb24uZGF0YWJhc2VdCmVuYWJsZWQgPSBmYWxzZQpzcWxpdGVfd2FsX21vZGUgPSB0cnVlCmNoZWNrcG9pbnRfaW50ZXJ2YWwgPSAzMAplbmFibGVfbm9jb3cgPSBmYWxzZQoKW21haW50ZW5hbmNlXQplbmFibGVkID0gZmFsc2UKYmFsYW5jZV9zY2hlZHVsZSA9ICIwIDIgKiAqICoiCmJhbGFuY2VfdGhyZXNob2xkID0gMC43CnNjcnViX3NjaGVkdWxlID0gIjAgMyAqICogMCIKc25hcHNob3RfY2xlYW51cF9zY2hlZHVsZSA9ICIwIDQgKiAqICoiCgpbbWFpbnRlbmFuY2Uuc25hcHNob3RfcmV0ZW50aW9uXQpkYWlseSA9IDcKd2Vla2x5ID0gNAptb250aGx5ID0gMw==" | base64 -d > /tmp/csi-config.toml
         echo "Config created:"
         cat /tmp/csi-config.toml
         
         echo "Starting CSI driver on port 9201..."
-        timeout 300 ./target/release/btrfs-csi \
+        sudo timeout 300 ./target/release/btrfs-csi \
           --config /tmp/csi-config.toml \
           --endpoint 0.0.0.0:9201 \
           --node-id test-node-1 \
