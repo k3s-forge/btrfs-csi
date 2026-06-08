@@ -1,0 +1,243 @@
+# Btrfs CSI Driver
+
+A Container Storage Interface (CSI) driver for Btrfs with built-in replication support, designed for Nomad clusters.
+
+## Features
+
+- **Btrfs Native Storage**: Leverages Btrfs subvolumes and snapshots
+- **Async Replication**: Built-in asynchronous replication with configurable intervals
+- **Gossip-based Discovery**: Automatic node discovery using gossip protocol
+- **HMAC Authentication**: Secure inter-node communication
+- **Database Support**: Optimized for SQLite and other databases
+- **Maintenance Automation**: Automatic balance, scrub, and snapshot cleanup
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      Nomad Cluster                         │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │  CSI Driver (System Job)                            │   │
+│  │  ├── Gossip Service (Node Discovery)                │   │
+│  │  ├── Replicator (Async Replication)                 │   │
+│  │  ├── Volume Manager (Lifecycle Management)          │   │
+│  │  └── Maintenance Scheduler                          │   │
+│  └─────────────────────────────────────────────────────┘   │
+│                                                             │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │  Btrfs Operations                                   │   │
+│  │  ├── Subvolume Management                           │   │
+│  │  ├── Snapshot Management                            │   │
+│  │  └── Filesystem Usage                               │   │
+│  └─────────────────────────────────────────────────────┘   │
+│                                                             │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │  Transport Layer                                    │   │
+│  │  ├── TCP Communication                              │   │
+│  │  └── HMAC Authentication                            │   │
+│  └─────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Project Structure
+
+```
+btrfs-csi/
+├── crates/
+│   ├── btrfs-csi/          # Main CSI driver binary
+│   ├── btrfs-exchange/     # Exchange engine (gossip, replication)
+│   ├── btrfs-ops/          # Btrfs operations wrapper
+│   └── btrfs-protocol/     # Communication protocol
+├── config/                 # Configuration files
+├── deploy/                 # Nomad job files
+└── proto/                  # Protocol definitions
+```
+
+## Quick Start
+
+### Prerequisites
+
+- Rust 1.75+
+- Btrfs tools (`btrfs-progs`)
+- Nomad cluster
+
+### Build
+
+```bash
+# Clone the repository
+git clone https://github.com/your-org/btrfs-csi.git
+cd btrfs-csi
+
+# Build release
+cargo build --release
+```
+
+### Configuration
+
+1. Generate an authentication key:
+```bash
+openssl rand -hex 32
+```
+
+2. Edit configuration:
+```bash
+cp config/config.toml /etc/btrfs-csi/config.toml
+# Edit /etc/btrfs-csi/config.toml
+```
+
+### Deploy to Nomad
+
+```bash
+nomad job run deploy/nomad/btrfs-csi.hcl
+```
+
+## Configuration Options
+
+### Node Configuration
+
+```toml
+[node]
+node_id = ""              # Auto-generated if empty
+listen_addr = "0.0.0.0"
+listen_port = 9200
+zone = "dc1"
+auth_key = ""             # Required: shared secret
+seed_nodes = []           # Initial cluster nodes
+```
+
+### Replication Configuration
+
+```toml
+[replication]
+default_replica_count = 2
+default_interval = 30     # seconds
+data_dir = "/mnt/data"
+snapshot_dir = "/mnt/snapshots"
+enable_incremental = true
+```
+
+### Database Configuration
+
+```toml
+[replication.database]
+enabled = true
+sqlite_wal_mode = true
+checkpoint_interval = 30
+enable_nocow = false
+```
+
+### Maintenance Configuration
+
+```toml
+[maintenance]
+enabled = true
+balance_schedule = "0 2 * * *"      # Daily at 2 AM
+balance_threshold = 0.7
+scrub_schedule = "0 3 * * 0"        # Weekly on Sunday
+snapshot_cleanup_schedule = "0 4 * * *"
+
+[maintenance.snapshot_retention]
+daily = 7
+weekly = 4
+monthly = 3
+```
+
+## Usage
+
+### Create a Volume
+
+```bash
+# Using the CSI driver API
+btrfs-csi create --name my-volume --size 10GiB --replicas 2
+```
+
+### List Volumes
+
+```bash
+btrfs-csi list
+```
+
+### Delete a Volume
+
+```bash
+btrfs-csi delete --name my-volume
+```
+
+## Nomad Integration
+
+### Volume Definition
+
+```hcl
+volume "database-data" {
+  type = "csi"
+  plugin_id = "btrfs-csi"
+
+  capacity_min = "10GiB"
+  capacity_max = "100GiB"
+
+  capability {
+    access_mode = "single-node-writer"
+    attachment_mode = "file-system"
+  }
+
+  parameters {
+    replica_count = "3"
+    replica_zones = "az-1,az-2,az-3"
+    replication_interval = "30s"
+  }
+}
+```
+
+### Job with Volume
+
+```hcl
+job "database" {
+  group "db" {
+    volume "data" {
+      type = "csi"
+      source = "database-data"
+    }
+
+    task "postgres" {
+      driver = "docker"
+
+      config {
+        image = "postgres:15"
+      }
+
+      volume_mount {
+        volume = "data"
+        destination = "/var/lib/postgresql/data"
+      }
+    }
+  }
+}
+```
+
+## Development
+
+### Project Modules
+
+- **btrfs-protocol**: Communication protocol and transport layer
+- **btrfs-ops**: Btrfs command wrappers
+- **btrfs-exchange**: Exchange engine with gossip and replication
+- **btrfs-csi**: Main CSI driver binary
+
+### Running Tests
+
+```bash
+cargo test
+```
+
+### Code Style
+
+```bash
+cargo fmt
+cargo clippy
+```
+
+## License
+
+MIT
