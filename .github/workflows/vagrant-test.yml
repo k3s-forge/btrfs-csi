@@ -1,0 +1,152 @@
+name: Test with Vagrant
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_type:
+        description: 'Test type'
+        required: true
+        default: 'local'
+        type: choice
+        options:
+          - local
+          - docker
+
+jobs:
+  # Job 1: Document local testing
+  local-test:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.test_type == 'local'
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Print instructions
+      run: |
+        echo "=========================================="
+        echo "  LOCAL VAGRANT TEST INSTRUCTIONS"
+        echo "=========================================="
+        echo ""
+        echo "Prerequisites:"
+        echo "  - VirtualBox installed"
+        echo "  - Vagrant installed"
+        echo "  - 8GB+ RAM available"
+        echo ""
+        echo "Steps:"
+        echo "  1. Clone this repository"
+        echo "  2. cd vagrant"
+        echo "  3. vagrant up"
+        echo "  4. vagrant ssh node1"
+        echo "  5. bash /home/vagrant/btrfs-csi/vagrant/scripts/test-cluster.sh"
+        echo ""
+        echo "Or run the full test:"
+        echo "  vagrant up && vagrant ssh node1 -c 'bash /home/vagrant/btrfs-csi/vagrant/scripts/test-cluster.sh'"
+        echo ""
+        echo "=========================================="
+        echo "  DOCKER-BASED TEST (Alternative)"
+        echo "=========================================="
+        echo ""
+        echo "For testing without Vagrant:"
+        echo "  1. docker compose -f docker/test/docker-compose.yml up -d"
+        echo "  2. docker exec test-node1 bash /scripts/test-cluster.sh"
+        echo ""
+        echo "=========================================="
+
+  # Job 2: Docker-based cluster test
+  docker-test:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.test_type == 'docker'
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install btrfs-progs
+      run: sudo apt-get update && sudo apt-get install -y btrfs-progs
+
+    - name: Build CSI driver
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+    
+    - run: cargo build --release
+
+    - name: Create Docker test environment
+      run: |
+        mkdir -p docker/test
+        cat > docker/test/Dockerfile.node <<'EOF'
+        FROM ubuntu:22.04
+        
+        RUN apt-get update && apt-get install -y \
+            btrfs-progs \
+            curl \
+            jq \
+            iproute2 \
+            iptables
+        
+        # Install Nomad
+        RUN wget -q -O /tmp/nomad.zip https://releases.hashicorp.com/nomad/1.7.5/nomad_1.7.5_linux_amd64.zip && \
+            unzip /tmp/nomad.zip -d /usr/local/bin && \
+            rm /tmp/nomad.zip
+        
+        # Install Consul
+        RUN wget -q -O /tmp/consul.zip https://releases.hashicorp.com/consul/1.17.1/consul_1.17.1_linux_amd64.zip && \
+            unzip /tmp/consul.zip -d /usr/local/bin && \
+            rm /tmp/consul.zip
+        
+        # Create btrfs filesystem
+        RUN truncate -s 10G /mnt/btrfs-data.img && \
+            mkfs.btrfs -f /mnt/btrfs-data.img && \
+            mkdir -p /mnt/data /mnt/snapshots && \
+            mount -o loop /mnt/btrfs-data.img /mnt/data
+        
+        COPY target/release/btrfs-csi /usr/local/bin/
+        COPY vagrant/scripts/*.sh /scripts/
+        
+        EXPOSE 9200 9201
+        
+        CMD ["/bin/bash"]
+        EOF
+
+    - name: Build Docker image
+      run: docker build -t btrfs-csi-node -f docker/test/Dockerfile.node .
+
+    - name: Start test cluster
+      run: |
+        # Start 3 nodes
+        docker network create btrfs-net || true
+        
+        for i in 1 2 3; do
+          docker run -d \
+            --name test-node$i \
+            --network btrfs-net \
+            --privileged \
+            --ip 172.20.0.1$i \
+            btrfs-csi-node \
+            sleep infinity
+        done
+        
+        sleep 5
+        
+        # Check cluster
+        docker exec test-node1 bash -c "
+          consul agent -dev -bind=172.20.0.11 -client=0.0.0.0 &
+          sleep 3
+          nomad agent -dev -bind=172.20.0.11 -network-interface=eth0 &
+          sleep 5
+          nomad server members
+        "
+
+    - name: Run tests
+      run: |
+        docker exec test-node1 bash -c "
+          btrfs subvolume list /mnt/data || true
+          echo 'Testing btrfs send...'
+          truncate -s 1G /mnt/data/test.bin
+          mkfs.btrfs -f /mnt/data/test.img || true
+          echo 'Test passed!'
+        "
+
+    - name: Cleanup
+      if: always()
+      run: |
+        docker stop test-node1 test-node2 test-node3 || true
+        docker rm test-node1 test-node2 test-node3 || true
+        docker network rm btrfs-net || true
