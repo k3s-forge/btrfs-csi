@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::process::Stdio;
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tracing::{debug, error, warn};
 
@@ -97,5 +98,3 @@ impl BtrfsCommand {
         Ok(())
     }
 }
-
-use tokio::io::AsyncWriteExt;
