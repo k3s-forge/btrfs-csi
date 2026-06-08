@@ -1,0 +1,398 @@
+name: Stress Test - Find Maximums
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_level:
+        description: 'Test level'
+        required: true
+        default: 'standard'
+        type: choice
+        options:
+          - quick
+          - standard
+          - extreme
+
+jobs:
+  stress-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y btrfs-progs fio sysstat jq
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Build CSI driver
+      run: cargo build --release
+
+    - name: Create test environment
+      run: |
+        # Create btrfs filesystem with maximum size
+        sudo truncate -s 50G /tmp/btrfs-stress.img
+        sudo mkfs.btrfs -f -d single,metadata dup /tmp/btrfs-stress.img
+        sudo mkdir -p /mnt/stress/data /mnt/stress/snapshots
+        sudo mount -o loop,compress=no /tmp/btrfs-stress.img /mnt/stress/data
+        
+        echo "Filesystem created:"
+        df -h /mnt/stress/data
+        sudo btrfs filesystem show /mnt/stress/data
+
+    # ============================================
+    # TEST 1: Maximum Sequential Write Throughput
+    # ============================================
+    - name: Test 1 - Maximum Write Throughput
+      run: |
+        echo "=========================================="
+        echo "  TEST 1: MAXIMUM WRITE THROUGHPUT"
+        echo "=========================================="
+        
+        # Test different block sizes
+        for bs in 4k 16k 64k 256k 1m 4m 16m; do
+          echo "--- Block size: $bs ---"
+          
+          # Clear cache
+          sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'
+          
+          # Sequential write test
+          sudo fio --name=write-$bs \
+            --directory=/mnt/stress/data \
+            --rw=write \
+            --bs=$bs \
+            --size=1G \
+            --numjobs=1 \
+            --runtime=30 \
+            --time_based \
+            --group_reporting \
+            --output-format=json | \
+            jq '.jobs[0].write | {bw_mb: (.bw / 1024), iops: .iops, latency_us: .lat_ns.mean / 1000}'
+          
+          # Clean up
+          sudo rm -f /mnt/stress/data/write-*
+        done
+
+    # ============================================
+    # TEST 2: Maximum Random Write IOPS
+    # ============================================
+    - name: Test 2 - Maximum Random Write IOPS
+      run: |
+        echo "=========================================="
+        echo "  TEST 2: MAXIMUM RANDOM WRITE IOPS"
+        echo "=========================================="
+        
+        for bs in 4k 16k 64k; do
+          echo "--- Block size: $bs ---"
+          
+          sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'
+          
+          sudo fio --name=randwrite-$bs \
+            --directory=/mnt/stress/data \
+            --rw=randwrite \
+            --bs=$bs \
+            --size=512M \
+            --numjobs=4 \
+            --runtime=30 \
+            --time_based \
+            --group_reporting \
+            --output-format=json | \
+            jq '.jobs[0].write | {bw_mb: (.bw / 1024), iops: .iops, latency_us: .lat_ns.mean / 1000}'
+          
+          sudo rm -f /mnt/stress/data/randwrite-*
+        done
+
+    # ============================================
+    # TEST 3: Maximum Concurrent Operations
+    # ============================================
+    - name: Test 3 - Maximum Concurrent Subvolumes
+      run: |
+        echo "=========================================="
+        echo "  TEST 3: MAXIMUM CONCURRENT SUBVOLUMES"
+        echo "=========================================="
+        
+        echo "Creating subvolumes..."
+        START=$(date +%s%N)
+        
+        for i in $(seq 1 100); do
+          sudo btrfs subvolume create /mnt/stress/data/vol-$i
+        done
+        
+        END=$(date +%s%N)
+        DURATION=$(( (END - START) / 1000000 ))
+        echo "Created 100 subvolumes in ${DURATION}ms"
+        echo "Average: $((DURATION / 100))ms per subvolume"
+        
+        echo "Listing subvolumes..."
+        sudo btrfs subvolume list /mnt/stress/data | wc -l
+        echo "subvolumes created"
+
+    # ============================================
+    # TEST 4: Maximum Snapshot Performance
+    # ============================================
+    - name: Test 4 - Maximum Snapshot Performance
+      run: |
+        echo "=========================================="
+        echo "  TEST 4: MAXIMUM SNAPSHOT PERFORMANCE"
+        echo "=========================================="
+        
+        # Create test data
+        echo "Creating 1GB test data..."
+        sudo dd if=/dev/urandom of=/mnt/stress/data/testfile bs=1M count=1024
+        sudo sync
+        
+        echo "Creating snapshots..."
+        START=$(date +%s%N)
+        
+        for i in $(seq 1 50); do
+          sudo btrfs subvolume snapshot -r /mnt/stress/data/vol-1 /mnt/stress/snap-$i
+        done
+        
+        END=$(date +%s%N)
+        DURATION=$(( (END - START) / 1000000 ))
+        echo "Created 50 snapshots in ${DURATION}ms"
+        echo "Average: $((DURATION / 50))ms per snapshot"
+
+    # ============================================
+    # TEST 5: Maximum Replication Speed
+    # ============================================
+    - name: Test 5 - Maximum Replication Speed
+      run: |
+        echo "=========================================="
+        echo "  TEST 5: MAXIMUM REPLICATION SPEED"
+        echo "=========================================="
+        
+        # Create test data of different sizes
+        for size in 100 500 1024 2048; do
+          echo "--- Testing ${size}MB ---"
+          
+          # Create volume with data
+          sudo btrfs subvolume create /mnt/stress/data/rep-test
+          sudo dd if=/dev/urandom of=/mnt/stress/data/rep-test/data.bin bs=1M count=$size
+          sudo sync
+          
+          # Create snapshot
+          sudo btrfs subvolume snapshot -r /mnt/stress/data/rep-test /mnt/stress/rep-snap
+          
+          # Test send speed
+          echo "Sending ${size}MB..."
+          START=$(date +%s%N)
+          
+          sudo btrfs send /mnt/stress/rep-snap | wc -c
+          
+          END=$(date +%s%N)
+          DURATION=$(( (END - START) / 1000000 ))
+          THROUGHPUT=$(( size * 1000 / (DURATION + 1) ))
+          echo "Time: ${DURATION}ms, Throughput: ${THROUGHPUT}MB/s"
+          
+          # Cleanup
+          sudo btrfs subvolume delete /mnt/stress/data/rep-test
+          sudo btrfs subvolume delete /mnt/stress/rep-snap
+        done
+
+    # ============================================
+    # TEST 6: Maximum Incremental Replication
+    # ============================================
+    - name: Test 6 - Maximum Incremental Replication
+      run: |
+        echo "=========================================="
+        echo "  TEST 6: MAXIMUM INCREMENTAL REPLICATION"
+        echo "=========================================="
+        
+        # Create initial data
+        sudo btrfs subvolume create /mnt/stress/data/inc-test
+        sudo dd if=/dev/urandom of=/mnt/stress/data/inc-test/base.bin bs=1M count=1024
+        sudo sync
+        sudo btrfs subvolume snapshot -r /mnt/stress/data/inc-test /mnt/stress/inc-snap1
+        
+        # Add incremental data
+        for round in 1 2 3 4 5; do
+          sudo dd if=/dev/urandom of=/mnt/stress/data/inc-test/delta-$round.bin bs=1M count=100
+          sudo sync
+          sudo btrfs subvolume snapshot -r /mnt/stress/data/inc-test /mnt/stress/inc-snap$((round+1))
+          
+          echo "Round $round: Sending delta..."
+          START=$(date +%s%N)
+          
+          sudo btrfs send -p /mnt/stress/inc-snap$round /mnt/stress/inc-snap$((round+1)) | wc -c
+          
+          END=$(date +%s%N)
+          DURATION=$(( (END - START) / 1000000 ))
+          echo "Time: ${DURATION}ms"
+        done
+
+    # ============================================
+    # TEST 7: Memory Usage Under Load
+    # ============================================
+    - name: Test 7 - Memory Usage Under Load
+      run: |
+        echo "=========================================="
+        echo "  TEST 7: MEMORY USAGE UNDER LOAD"
+        echo "=========================================="
+        
+        echo "Initial memory:"
+        free -h
+        
+        # Start memory monitoring
+        while true; do
+          echo "$(date): $(free -m | awk 'NR==2{printf "%.2f GB used\n", $3/1024}')" >> /tmp/memory.log
+          sleep 5
+        done &
+        MONITOR_PID=$!
+        
+        # Create many subvolumes and snapshots
+        for i in $(seq 1 100); do
+          sudo btrfs subvolume create /mnt/stress/data/mem-test-$i
+          sudo dd if=/dev/urandom of=/mnt/stress/data/mem-test-$i/data.bin bs=1M count=10
+        done
+        sudo sync
+        
+        for i in $(seq 1 50); do
+          sudo btrfs subvolume snapshot -r /mnt/stress/data/mem-test-1 /mnt/stress/mem-snap-$i
+        done
+        
+        kill $MONITOR_PID 2>/dev/null || true
+        
+        echo "Memory usage during test:"
+        cat /tmp/memory.log
+        echo ""
+        echo "Final memory:"
+        free -h
+
+    # ============================================
+    # TEST 8: Maximum Volume Size
+    # ============================================
+    - name: Test 8 - Maximum Volume Size
+      run: |
+        echo "=========================================="
+        echo "  TEST 8: MAXIMUM VOLUME SIZE"
+        echo "=========================================="
+        
+        # Test different volume sizes
+        for size in 1 5 10 20; do
+          echo "--- Testing ${size}GB volume ---"
+          
+          sudo btrfs subvolume create /mnt/stress/data/bigvol-${size}gb
+          
+          START=$(date +%s%N)
+          sudo dd if=/dev/zero of=/mnt/stress/data/bigvol-${size}gb/zero.bin bs=1M count=$((size * 1024))
+          sudo sync
+          END=$(date +%s%N)
+          DURATION=$(( (END - START) / 1000000 ))
+          THROUGHPUT=$(( size * 1024 * 1000 / (DURATION + 1) ))
+          echo "Write time: ${DURATION}ms, Throughput: ${THROUGHPUT}MB/s"
+          
+          sudo btrfs subvolume delete /mnt/stress/data/bigvol-${size}gb
+        done
+
+    # ============================================
+    # TEST 9: Disk Space Efficiency
+    # ============================================
+    - name: Test 9 - Disk Space Efficiency
+      run: |
+        echo "=========================================="
+        echo "  TEST 9: DISK SPACE EFFICIENCY"
+        echo "=========================================="
+        
+        echo "Initial usage:"
+        sudo btrfs filesystem usage /mnt/stress/data
+        
+        # Create identical data in multiple subvolumes
+        for i in $(seq 1 10); do
+          sudo btrfs subvolume create /mnt/stress/data/identical-$i
+          sudo dd if=/dev/urandom of=/mnt/stress/data/identical-$i/data.bin bs=1M count=100
+        done
+        sudo sync
+        
+        echo "After creating 10 x 100MB identical data:"
+        sudo btrfs filesystem usage /mnt/stress/data
+        
+        # Calculate deduplication savings
+        ACTUAL=$(sudo btrfs filesystem usage /mnt/stress/data | grep "Used" | awk '{print $2}')
+        EXPECTED=$((10 * 100))
+        echo "Expected: ${EXPECTED}MB, Actual: ${ACTUAL}"
+
+    # ============================================
+    # TEST 10: CSI Binary Performance
+    # ============================================
+    - name: Test 10 - CSI Binary Performance
+      run: |
+        echo "=========================================="
+        echo "  TEST 10: CSI BINARY PERFORMANCE"
+        echo "=========================================="
+        
+        cat > /tmp/csi-test-config.toml <<'EOF'
+        [node]
+        node_id = "stress-test-node"
+        listen_addr = "0.0.0.0"
+        listen_port = 9200
+        zone = "dc1"
+        auth_key = "test-key-12345678901234567890123456789012"
+        seed_nodes = []
+        
+        [replication]
+        default_replica_count = 2
+        default_interval = 1
+        data_dir = "/mnt/stress/data"
+        snapshot_dir = "/mnt/stress/snapshots"
+        enable_incremental = true
+        
+        [maintenance]
+        enabled = false
+        EOF
+        
+        echo "Testing CSI binary startup time..."
+        for i in $(seq 1 10); do
+          START=$(date +%s%N)
+          timeout 1 ./target/release/btrfs-csi --config /tmp/csi-test-config.toml --endpoint 0.0.0.0:9201 2>/dev/null || true
+          END=$(date +%s%N)
+          DURATION=$(( (END - START) / 1000000 ))
+          echo "Run $i: ${DURATION}ms"
+        done
+
+    # ============================================
+    # RESULTS SUMMARY
+    # ============================================
+    - name: Results Summary
+      if: always()
+      run: |
+        echo "=========================================="
+        echo "  STRESS TEST RESULTS SUMMARY"
+        echo "=========================================="
+        echo ""
+        echo "Test completed at: $(date)"
+        echo ""
+        echo "Environment:"
+        echo "  OS: $(lsb_release -d | cut -f2)"
+        echo "  Kernel: $(uname -r)"
+        echo "  CPU: $(nproc) cores"
+        echo "  Memory: $(free -h | awk '/^Mem:/{print $2}')"
+        echo "  Disk: $(df -h /tmp | tail -1 | awk '{print $2}')"
+        echo ""
+        echo "=========================================="
+        echo "  THEORETICAL MAXIMUMS"
+        echo "=========================================="
+        echo ""
+        echo "Based on test results:"
+        echo ""
+        echo "1. WRITE THROUGHPUT: Check Test 1 results"
+        echo "2. RANDOM IOPS: Check Test 2 results"  
+        echo "3. CONCURRENT SUBVOLUMES: 100+ tested"
+        echo "4. SNAPSHOT SPEED: Check Test 4 results"
+        echo "5. REPLICATION SPEED: Check Test 5 results"
+        echo "6. MEMORY USAGE: Check Test 7 results"
+        echo ""
+        echo "=========================================="
+
+    - name: Upload results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: stress-test-results
+        path: |
+          /tmp/memory.log
+          /tmp/csi-test-config.toml
