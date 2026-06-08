@@ -1,7 +1,1 @@
-/target
-*.swp
-*.swo
-*~
-.vscode/
-.idea/
-Cargo.lock
+retry
