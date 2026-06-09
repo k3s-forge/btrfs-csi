@@ -81,26 +81,7 @@ jobs:
             echo "  Waiting for client... ($i)"
           done
       - name: Deploy CSI plugin
-        run: |
-          printf '%s\n' \
-            'job "btrfs-csi" {' \
-            '  type = "system"' \
-            '  datacenters = ["dc1"]' \
-            '  group "nodes" {' \
-            '    task "plugin" {' \
-            '      driver = "raw_exec"' \
-            '      config { command = "/usr/local/bin/btrfs-csi-entrypoint.sh" }' \
-            '      csi_plugin {' \
-            '        id = "btrfs-csi"' \
-            '        type = "monolith"' \
-            '        mount_dir = "/var/tmp/csi"' \
-            '        health_timeout = "120s"' \
-            '      }' \
-            '      resources { cpu = 500; memory = 256 }' \
-            '    }' \
-            '  }' \
-            '}' | sudo tee /tmp/csi-plugin.nomad > /dev/null
-          NOMAD_ADDR=http://127.0.0.1:14646 nomad job run /tmp/csi-plugin.nomad
+        run: echo 'am9iICJidHJmcy1jc2kiIHsKICB0eXBlID0gInN5c3RlbSIKICBkYXRhY2VudGVycyA9IFsiZGMxIl0KICBncm91cCAibm9kZXMiIHsKICAgIHRhc2sgInBsdWdpbiIgewogICAgICBkcml2ZXIgPSAicmF3X2V4ZWMiCiAgICAgIGNvbmZpZyB7IGNvbW1hbmQgPSAiL3Vzci9sb2NhbC9iaW4vYnRyZnMtY3NpLWVudHJ5cG9pbnQuc2giIH0KICAgICAgY3NpX3BsdWdpbiB7CiAgICAgICAgaWQgPSAiYnRyZnMtY3NpIgogICAgICAgIHR5cGUgPSAibW9ub2xpdGgiCiAgICAgICAgbW91bnRfZGlyID0gIi92YXIvdG1wL2NzaSIKICAgICAgICBoZWFsdGhfdGltZW91dCA9ICIxMjBzIgogICAgICB9CiAgICAgIHJlc291cmNlcyB7IGNwdSA9IDUwMDsgbWVtb3J5ID0gMjU2IH0KICAgIH0KICB9Cn0=' | base64 -d | sudo tee /tmp/csi-plugin.nomad > /dev/null && NOMAD_ADDR=http://127.0.0.1:14646 nomad job run /tmp/csi-plugin.nomad
           for i in $(seq 1 30); do
             sleep 5
             PLUGIN_OK=$(NOMAD_ADDR=http://127.0.0.1:14646 nomad plugin status btrfs-csi 2>/dev/null || true)
