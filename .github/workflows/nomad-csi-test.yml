@@ -99,8 +99,7 @@ jobs:
             '      resources { cpu = 500; memory = 256 }' \
             '    }' \
             '  }' \
-            '}' \
-            > /tmp/csi-plugin.nomad
+            '}' | sudo tee /tmp/csi-plugin.nomad > /dev/null
           NOMAD_ADDR=http://127.0.0.1:14646 nomad job run /tmp/csi-plugin.nomad
           for i in $(seq 1 30); do
             sleep 5
