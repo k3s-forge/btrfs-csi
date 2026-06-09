@@ -51,6 +51,11 @@ jobs:
             '  rpc = 14647' \
             '  serf = 14648' \
             '}' \
+            'advertise {' \
+            '  http = "127.0.0.1"' \
+            '  rpc = "127.0.0.1"' \
+            '  serf = "127.0.0.1"' \
+            '}' \
             | sudo tee /tmp/nomad/server.hcl > /dev/null
           SERVER_OK=""
           nomad agent -config=/tmp/nomad/server.hcl > /tmp/nomad-server.log 2>&1 &
