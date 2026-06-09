@@ -367,6 +367,8 @@ impl Replicator {
         let stdout = child.stdout.take().context("Failed to capture stdout")?;
         let mut reader = tokio::io::BufReader::new(stdout);
         let mut buffer = vec![0u8; 64 * 1024]; // 64KB chunks
+        let mut hasher = blake3::Hasher::new();
+        let mut total_bytes: u64 = 0;
 
         use tokio::io::AsyncReadExt;
         loop {
@@ -376,6 +378,9 @@ impl Replicator {
             }
 
             let chunk = &buffer[..n];
+            hasher.update(chunk);
+            total_bytes += n as u64;
+
             let send_msg = Message::new(
                 MessageType::SendData,
                 chunk.to_vec(),
@@ -395,13 +400,20 @@ impl Replicator {
             return Err(anyhow::anyhow!("btrfs send failed: {}", stderr_msg));
         }
 
-        // Send completion
+        let checksum = hasher.finalize().to_hex().to_string();
+        info!(
+            "Sent {} bytes for volume {} (checksum={})",
+            total_bytes, snapshot.name, checksum
+        );
+
+        // Send completion with checksum
         let complete_msg = Message::new(
             MessageType::SendComplete,
             serde_json::to_vec(&SendCompleteResponse {
                 volume_id: snapshot.name.clone(),
                 success: true,
                 error: None,
+                checksum: Some(checksum),
             })?,
         );
         conn.send_message(&complete_msg).await?;

@@ -234,4 +234,5 @@ pub struct SendCompleteResponse {
     pub volume_id: String,
     pub success: bool,
     pub error: Option<String>,
+    pub checksum: Option<String>,
 }

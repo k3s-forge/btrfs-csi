@@ -7,6 +7,7 @@ use tracing_subscriber::EnvFilter;
 use btrfs_csi::csi_server::CsiGrpcServer;
 use btrfs_exchange::config::ExchangeConfig;
 use btrfs_exchange::gossip::GossipService;
+use btrfs_exchange::receiver::ReplicationReceiver;
 use btrfs_exchange::replicator::Replicator;
 
 /// Btrfs CSI Driver with replication support
@@ -130,6 +131,14 @@ async fn main() -> Result<()> {
 
     // Start replicator
     replicator.start().await?;
+
+    // Start replication receiver (listens for incoming btrfs send streams)
+    let receiver = ReplicationReceiver::new(config.clone());
+    tokio::spawn(async move {
+        if let Err(e) = receiver.start().await {
+            tracing::error!("Replication receiver error: {}", e);
+        }
+    });
 
     // Create and start gRPC server
     let server = CsiGrpcServer::new(
