@@ -33,6 +33,10 @@ struct Args {
     /// Log level (trace, debug, info, warn, error)
     #[arg(long, default_value = "info")]
     log_level: String,
+
+    /// Auth key (overrides config)
+    #[arg(long)]
+    auth_key: Option<String>,
 }
 
 /// Scan for stale CSI mounts in a directory and attempt cleanup
@@ -102,6 +106,17 @@ async fn main() -> Result<()> {
     }
     if let Some(zone) = args.zone {
         config.zone = zone;
+    }
+    if let Some(auth_key) = args.auth_key {
+        config.auth_key = auth_key;
+    }
+
+    // Security: refuse to start with empty auth key
+    if config.auth_key.is_empty() {
+        eprintln!("FATAL: auth_key is empty. Inter-node HMAC authentication is disabled.");
+        eprintln!("Set auth_key in config.toml or via --auth-key flag.");
+        eprintln!("Generate a key: openssl rand -hex 32");
+        std::process::exit(1);
     }
 
     // Ensure data directories exist

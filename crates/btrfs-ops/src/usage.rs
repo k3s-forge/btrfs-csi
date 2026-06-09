@@ -1,6 +1,5 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use tracing::debug;
 
 use super::commands::BtrfsCommand;
 
@@ -107,7 +106,6 @@ impl UsageManager {
 fn parse_usage_output(output: &str) -> Result<FilesystemUsage> {
     let mut total = 0;
     let mut used = 0;
-    let mut free = 0;
     let mut data_size = 0;
     let mut metadata_size = 0;
     let mut system_size = 0;

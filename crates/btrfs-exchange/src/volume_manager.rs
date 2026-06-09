@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use btrfs_ops::subvolume::{Subvolume, SubvolumeManager};
+use btrfs_ops::subvolume::SubvolumeManager;
 use btrfs_protocol::message::VolumeInfo;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -107,7 +107,7 @@ impl VolumeManager {
         info!("Creating volume: {} (size: {})", name, size);
 
         // Create subvolume
-        let subvol = self
+        let _subvol = self
             .subvol_manager
             .create(name)
             .await

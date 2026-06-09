@@ -1,1 +1,6 @@
-retry
+/target
+*.swp
+*.swo
+*~
+.vscode/
+.idea/

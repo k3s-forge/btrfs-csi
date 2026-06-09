@@ -277,14 +277,25 @@ impl GossipService {
     }
 }
 
-/// Get free space for a path
+/// Get free space for a path using btrfs filesystem usage
 fn get_free_space(path: &str) -> u64 {
-    std::fs::metadata(path)
+    std::process::Command::new("btrfs")
+        .args(["filesystem", "usage", "-b", path])
+        .output()
         .ok()
-        .and_then(|_| {
-            // This is a simplified version
-            // In production, use statvfs
-            Some(1024 * 1024 * 1024) // 1 GB placeholder
+        .and_then(|o| {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            for line in stdout.lines() {
+                if line.contains("Free (estimated):") || line.contains("Free:") {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if let Some(s) = parts.last() {
+                        if let Ok(val) = s.parse::<u64>() {
+                            return Some(val);
+                        }
+                    }
+                }
+            }
+            None
         })
         .unwrap_or(0)
 }

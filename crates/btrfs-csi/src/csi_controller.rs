@@ -14,6 +14,31 @@ use crate::csi::*;
 const VOLUMES_FILE: &str = "volumes.json";
 const SNAPSHOTS_FILE: &str = "snapshots.json";
 
+/// Validate volume name: reject path traversal, null bytes, empty names
+fn validate_volume_name(name: &str) -> Result<(), Status> {
+    if name.is_empty() {
+        return Err(Status::invalid_argument("volume name must not be empty"));
+    }
+    if name.contains('\0') {
+        return Err(Status::invalid_argument("volume name must not contain null bytes"));
+    }
+    if name.contains("..") || name.contains('/') || name.contains('\\') {
+        return Err(Status::invalid_argument(format!(
+            "volume name must not contain path separators or '..': {}", name
+        )));
+    }
+    // Allow alphanumeric, hyphens, underscores, dots (max 255 chars)
+    if name.len() > 255 {
+        return Err(Status::invalid_argument("volume name too long (max 255 chars)"));
+    }
+    if !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.') {
+        return Err(Status::invalid_argument(
+            "volume name must only contain [a-zA-Z0-9._-]"
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct CsiController {
     node_id: String,
@@ -122,11 +147,13 @@ impl CsiController {
         tokio::fs::write(self.snapshots_path(), json).await
     }
 
-    fn get_profile(&self, profile_type: &str) -> &VolumeProfile {
+    fn get_profile(&self, profile_type: &str) -> Result<&VolumeProfile, Status> {
         self.volume_profiles
             .get(profile_type)
             .or_else(|| self.volume_profiles.get("default"))
-            .expect("default volume profile must exist")
+            .ok_or_else(|| Status::internal(format!(
+                "No volume profile found for '{}' and no default profile configured", profile_type
+            )))
     }
 }
 
@@ -138,6 +165,9 @@ impl Controller for CsiController {
     ) -> Result<Response<CreateVolumeResponse>, Status> {
         let req = request.into_inner();
         tracing::info!("CSI CreateVolume: name={}", req.name);
+
+        // Security: validate volume name
+        validate_volume_name(&req.name)?;
 
         let capacity = req
             .capacity_range
@@ -206,7 +236,7 @@ impl Controller for CsiController {
             .cloned()
             .unwrap_or_else(|| "default".to_string());
 
-        let profile = self.get_profile(&profile_type);
+        let profile = self.get_profile(&profile_type)?;
 
         // Validate database profile: sync_writes must be true for data integrity
         if profile_type == "database" && !profile.sync_writes {
@@ -421,6 +451,9 @@ impl Controller for CsiController {
     ) -> Result<Response<CreateSnapshotResponse>, Status> {
         let req = request.into_inner();
         tracing::info!("CSI CreateSnapshot: source={}, name={}", req.source_volume_id, req.name);
+
+        // Security: validate snapshot name
+        validate_volume_name(&req.name)?;
 
         let vol = {
             let volumes = self.volumes.read().await;
