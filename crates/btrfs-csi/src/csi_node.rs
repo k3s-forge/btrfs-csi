@@ -128,7 +128,7 @@ impl Node for CsiNode {
                 available: (total - used) as i64,
                 total: total as i64,
                 used: used as i64,
-                r#type: ngvsr::volume_usage::Unit::Bytes.into(),
+                unit: ngvsr::volume_usage::Unit::Bytes.into(),
             }),
             ..Default::default()
         }))
