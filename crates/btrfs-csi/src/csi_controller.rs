@@ -15,22 +15,21 @@ pub struct CsiController {
     data_dir: String,
     gossip: Arc<GossipService>,
     replicator: Arc<Replicator>,
-    volumes: Arc<RwLock<HashMap<String, VolumeInfo>>>,
-    snapshots: Arc<RwLock<HashMap<String, SnapshotInfo>>>,
+    volumes: Arc<RwLock<HashMap<String, VolInfo>>>,
+    snapshots: Arc<RwLock<HashMap<String, SnapInfo>>>,
 }
 
 #[derive(Clone, Debug)]
-struct VolumeInfo {
+struct VolInfo {
     id: String,
     name: String,
     size: u64,
     node_id: String,
     zone: String,
-    status: String,
 }
 
 #[derive(Clone, Debug)]
-struct SnapshotInfo {
+struct SnapInfo {
     id: String,
     source_volume_id: String,
     name: String,
@@ -65,41 +64,31 @@ impl Controller for CsiController {
         request: Request<CreateVolumeRequest>,
     ) -> Result<Response<CreateVolumeResponse>, Status> {
         let req = request.into_inner();
-        let volume_name = &req.name;
+        tracing::info!("CSI CreateVolume: name={}", req.name);
 
-        tracing::info!("CSI CreateVolume: name={}", volume_name);
-
-        // Determine capacity
         let capacity = req
             .capacity_range
             .as_ref()
             .map(|r| r.required_bytes as u64)
-            .unwrap_or(1024 * 1024 * 1024); // Default 1GB
+            .unwrap_or(1024 * 1024 * 1024);
 
-        // Check if volume already exists
         {
             let volumes = self.volumes.read().await;
-            if let Some(existing) = volumes.values().find(|v| v.name == volume_name) {
+            if let Some(existing) = volumes.values().find(|v| v.name == req.name) {
                 if existing.size >= capacity {
-                    tracing::info!("Volume {} already exists, returning it", volume_name);
                     return Ok(Response::new(CreateVolumeResponse {
                         volume: Some(Volume {
                             volume_id: existing.id.clone(),
                             capacity_bytes: existing.size as i64,
                             volume_capabilities: req.volume_capabilities.clone(),
-                            volume_context: HashMap::new(),
-                            parameters: HashMap::new(),
-                            content_source_volume_id: String::new(),
-                            content_source_snapshot_id: String::new(),
-                            accessible_topology: vec![],
+                            ..Default::default()
                         }),
                     }));
                 }
             }
         }
 
-        // Create btrfs subvolume
-        let subvol_path = format!("{}/{}", self.data_dir, volume_name);
+        let subvol_path = format!("{}/{}", self.data_dir, req.name);
         let output = tokio::process::Command::new("btrfs")
             .args(["subvolume", "create", &subvol_path])
             .output()
@@ -108,40 +97,28 @@ impl Controller for CsiController {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(Status::internal(format!(
-                "Failed to create subvolume: {}",
-                stderr
-            )));
+            return Err(Status::internal(format!("Failed to create subvolume: {}", stderr)));
         }
 
         let volume_id = format!("vol-{}", uuid::Uuid::new_v4());
-
-        let vol_info = VolumeInfo {
+        let vol = VolInfo {
             id: volume_id.clone(),
-            name: volume_name.clone(),
+            name: req.name.clone(),
             size: capacity,
             node_id: self.node_id.clone(),
             zone: self.zone.clone(),
-            status: "available".to_string(),
         };
 
-        {
-            let mut volumes = self.volumes.write().await;
-            volumes.insert(volume_id.clone(), vol_info);
-        }
+        { self.volumes.write().await.insert(volume_id.clone(), vol); }
 
-        tracing::info!("Volume {} created successfully (id={})", volume_name, volume_id);
+        tracing::info!("Volume {} created (id={})", req.name, volume_id);
 
         Ok(Response::new(CreateVolumeResponse {
             volume: Some(Volume {
                 volume_id,
                 capacity_bytes: capacity as i64,
                 volume_capabilities: req.volume_capabilities.clone(),
-                volume_context: HashMap::new(),
-                parameters: HashMap::new(),
-                content_source_volume_id: String::new(),
-                content_source_snapshot_id: String::new(),
-                accessible_topology: vec![],
+                ..Default::default()
             }),
         }))
     }
@@ -151,43 +128,20 @@ impl Controller for CsiController {
         request: Request<DeleteVolumeRequest>,
     ) -> Result<Response<DeleteVolumeResponse>, Status> {
         let req = request.into_inner();
-        tracing::info!("CSI DeleteVolume: volume_id={}", req.volume_id);
+        tracing::info!("CSI DeleteVolume: {}", req.volume_id);
 
-        // Get volume info
-        let vol_info = {
+        let vol = {
             let volumes = self.volumes.read().await;
             volumes.get(&req.volume_id).cloned()
-        };
+        }.ok_or_else(|| Status::not_found(format!("Volume {} not found", req.volume_id)))?;
 
-        let vol_info = vol_info.ok_or_else(|| {
-            Status::not_found(format!("Volume {} not found", req.volume_id))
-        })?;
-
-        // Delete btrfs subvolume
-        let subvol_path = format!("{}/{}", self.data_dir, vol_info.name);
-        let output = tokio::process::Command::new("btrfs")
+        let subvol_path = format!("{}/{}", self.data_dir, vol.name);
+        let _ = tokio::process::Command::new("btrfs")
             .args(["subvolume", "delete", &subvol_path])
             .output()
-            .await
-            .map_err(|e| Status::internal(format!("Failed to execute btrfs: {}", e)))?;
+            .await;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            // If it's a snapshot, try delete anyway
-            if !stderr.contains("not a subvolume") {
-                return Err(Status::internal(format!(
-                    "Failed to delete subvolume: {}",
-                    stderr
-                )));
-            }
-        }
-
-        {
-            let mut volumes = self.volumes.write().await;
-            volumes.remove(&req.volume_id);
-        }
-
-        tracing::info!("Volume {} deleted", req.volume_id);
+        { self.volumes.write().await.remove(&req.volume_id); }
 
         Ok(Response::new(DeleteVolumeResponse {}))
     }
@@ -197,32 +151,19 @@ impl Controller for CsiController {
         request: Request<ControllerPublishVolumeRequest>,
     ) -> Result<Response<ControllerPublishVolumeResponse>, Status> {
         let req = request.into_inner();
-        tracing::info!(
-            "CSI ControllerPublishVolume: volume_id={}, node_id={}",
-            req.volume_id,
-            req.node_id
-        );
+        tracing::info!("CSI ControllerPublishVolume: volume_id={}, node_id={}", req.volume_id, req.node_id);
 
-        // For btrfs, "publish" means ensuring the volume is available on the node
-        // Since btrfs volumes are local, we just return the path as publish context
-        let vol_info = {
+        let vol = {
             let volumes = self.volumes.read().await;
             volumes.get(&req.volume_id).cloned()
-        };
-
-        let vol_info = vol_info.ok_or_else(|| {
-            Status::not_found(format!("Volume {} not found", req.volume_id))
-        })?;
+        }.ok_or_else(|| Status::not_found(format!("Volume {} not found", req.volume_id)))?;
 
         let publish_context = serde_json::to_string(&serde_json::json!({
-            "path": format!("{}/{}", self.data_dir, vol_info.name),
+            "path": format!("{}/{}", self.data_dir, vol.name),
             "node_id": self.node_id,
-        }))
-        .unwrap_or_default();
+        })).unwrap_or_default();
 
-        Ok(Response::new(ControllerPublishVolumeResponse {
-            publish_context,
-        }))
+        Ok(Response::new(ControllerPublishVolumeResponse { publish_context }))
     }
 
     async fn controller_unpublish_volume(
@@ -230,12 +171,7 @@ impl Controller for CsiController {
         request: Request<ControllerUnpublishVolumeRequest>,
     ) -> Result<Response<ControllerUnpublishVolumeResponse>, Status> {
         let req = request.into_inner();
-        tracing::info!(
-            "CSI ControllerUnpublishVolume: volume_id={}, node_id={}",
-            req.volume_id,
-            req.node_id
-        );
-
+        tracing::info!("CSI ControllerUnpublishVolume: volume_id={}, node_id={}", req.volume_id, req.node_id);
         Ok(Response::new(ControllerUnpublishVolumeResponse {}))
     }
 
@@ -244,28 +180,20 @@ impl Controller for CsiController {
         request: Request<ValidateVolumeCapabilitiesRequest>,
     ) -> Result<Response<ValidateVolumeCapabilitiesResponse>, Status> {
         let req = request.into_inner();
-        tracing::info!("CSI ValidateVolumeCapabilities");
 
-        // Check volume exists
         {
             let volumes = self.volumes.read().await;
             if volumes.get(&req.volume_id).is_none() {
-                return Err(Status::not_found(format!(
-                    "Volume {} not found",
-                    req.volume_id
-                )));
+                return Err(Status::not_found(format!("Volume {} not found", req.volume_id)));
             }
         }
 
-        // We support everything btrfs supports
         Ok(Response::new(ValidateVolumeCapabilitiesResponse {
-            confirmed: Some(
-                validate_volume_capabilities_response::Confirmed {
-                    volume_capabilities: req.volume_capabilities.clone(),
-                    parameters: HashMap::new(),
-                },
-            ),
-            message: String::new(),
+            confirmed: Some(validate_volume_capabilities_response::Confirmed {
+                volume_capabilities: req.volume_capabilities.clone(),
+                ..Default::default()
+            }),
+            ..Default::default()
         }))
     }
 
@@ -274,74 +202,48 @@ impl Controller for CsiController {
         request: Request<ListVolumesRequest>,
     ) -> Result<Response<ListVolumesResponse>, Status> {
         let req = request.into_inner();
-        tracing::debug!("CSI ListVolumes");
 
         let volumes = self.volumes.read().await;
-        let mut entries: Vec<list_volumes_response::Entry> = volumes
-            .values()
-            .map(|v| list_volumes_response::Entry {
+        let mut entries: Vec<list_volumes_response::Entry> = volumes.values().map(|v| {
+            list_volumes_response::Entry {
                 volume: Some(Volume {
                     volume_id: v.id.clone(),
                     capacity_bytes: v.size as i64,
-                    volume_capabilities: None,
-                    volume_context: HashMap::new(),
-                    parameters: HashMap::new(),
-                    content_source_volume_id: String::new(),
-                    content_source_snapshot_id: String::new(),
-                    accessible_topology: vec![],
+                    ..Default::default()
                 }),
                 status: Some(VolumeStatus {
                     volume_id: v.id.clone(),
-                    node_id: vec![v.node_id.clone()],
-                    accessible_topology: vec![],
+                    ..Default::default()
                 }),
-            })
-            .collect();
+            }
+        }).collect();
 
-        // Simple pagination
-        let start = req
-            .starting_token
-            .parse::<usize>()
-            .unwrap_or(0);
+        let start = req.starting_token.parse::<usize>().unwrap_or(0);
         let max = req.max_entries as usize;
 
         if max > 0 && entries.len() > start + max {
             entries = entries.into_iter().skip(start).take(max).collect();
-            let next_token = (start + max).to_string();
-            Ok(Response::new(ListVolumesResponse {
-                entries,
-                next_token,
-            }))
+            Ok(Response::new(ListVolumesResponse { entries, next_token: (start + max).to_string() }))
         } else {
-            if start > 0 {
-                entries = entries.into_iter().skip(start).collect();
-            }
-            Ok(Response::new(ListVolumesResponse {
-                entries,
-                next_token: String::new(),
-            }))
+            if start > 0 { entries = entries.into_iter().skip(start).collect(); }
+            Ok(Response::new(ListVolumesResponse { entries, next_token: String::new() }))
         }
     }
 
     async fn get_capacity(
         &self,
-        request: Request<GetCapacityRequest>,
+        _request: Request<GetCapacityRequest>,
     ) -> Result<Response<GetCapacityResponse>, Status> {
-        tracing::debug!("CSI GetCapacity");
-
-        // Get filesystem usage via btrfs command
         let output = tokio::process::Command::new("btrfs")
             .args(["filesystem", "usage", "-b", &self.data_dir])
             .output()
             .await
-            .map_err(|e| Status::internal(format!("Failed to get filesystem usage: {}", e)))?;
+            .map_err(|e| Status::internal(format!("Failed to get usage: {}", e)))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let available = parse_btrfs_free_space(&stdout);
 
-        Ok(Response::new(GetCapacityResponse {
-            available_capacity: available as i64,
-        }))
+        Ok(Response::new(GetCapacityResponse { available_capacity: available as i64 }))
     }
 
     async fn create_snapshot(
@@ -349,71 +251,45 @@ impl Controller for CsiController {
         request: Request<CreateSnapshotRequest>,
     ) -> Result<Response<CreateSnapshotResponse>, Status> {
         let req = request.into_inner();
-        tracing::info!(
-            "CSI CreateSnapshot: source_volume_id={}, name={}",
-            req.source_volume_id,
-            req.name
-        );
+        tracing::info!("CSI CreateSnapshot: source={}, name={}", req.source_volume_id, req.name);
 
-        // Get source volume
-        let vol_info = {
+        let vol = {
             let volumes = self.volumes.read().await;
             volumes.get(&req.source_volume_id).cloned()
-        };
+        }.ok_or_else(|| Status::not_found(format!("Source volume {} not found", req.source_volume_id)))?;
 
-        let vol_info = vol_info.ok_or_else(|| {
-            Status::not_found(format!("Source volume {} not found", req.source_volume_id))
-        })?;
-
-        // Create btrfs snapshot
-        let source_path = format!("{}/{}", self.data_dir, vol_info.name);
+        let source_path = format!("{}/{}", self.data_dir, vol.name);
         let snap_path = format!("{}/{}", self.data_dir, req.name);
 
         let output = tokio::process::Command::new("btrfs")
-            .args([
-                "subvolume",
-                "snapshot",
-                "-r",
-                &source_path,
-                &snap_path,
-            ])
+            .args(["subvolume", "snapshot", "-r", &source_path, &snap_path])
             .output()
             .await
-            .map_err(|e| Status::internal(format!("Failed to execute btrfs: {}", e)))?;
+            .map_err(|e| Status::internal(format!("Failed to create snapshot: {}", e)))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(Status::internal(format!(
-                "Failed to create snapshot: {}",
-                stderr
-            )));
+            return Err(Status::internal(format!("Failed to create snapshot: {}", stderr)));
         }
 
         let snapshot_id = format!("snap-{}", uuid::Uuid::new_v4());
         let creation_time = chrono::Utc::now().timestamp();
 
-        let snap_info = SnapshotInfo {
+        self.snapshots.write().await.insert(snapshot_id.clone(), SnapInfo {
             id: snapshot_id.clone(),
             source_volume_id: req.source_volume_id.clone(),
             name: req.name.clone(),
-            size: vol_info.size,
+            size: vol.size,
             creation_time,
-        };
-
-        {
-            let mut snapshots = self.snapshots.write().await;
-            snapshots.insert(snapshot_id.clone(), snap_info);
-        }
-
-        tracing::info!("Snapshot {} created (id={})", req.name, snapshot_id);
+        });
 
         Ok(Response::new(CreateSnapshotResponse {
-            snapshot: Some(crate::csi::Snapshot {
+            snapshot: Some(Snapshot {
                 snapshot_id,
                 source_volume_id: req.source_volume_id,
                 creation_time,
-                size_bytes: vol_info.size as i64,
-                snapshot_context: HashMap::new(),
+                size_bytes: vol.size as i64,
+                ..Default::default()
             }),
         }))
     }
@@ -423,62 +299,42 @@ impl Controller for CsiController {
         request: Request<DeleteSnapshotRequest>,
     ) -> Result<Response<DeleteSnapshotResponse>, Status> {
         let req = request.into_inner();
-        tracing::info!("CSI DeleteSnapshot: snapshot_id={}", req.snapshot_id);
+        tracing::info!("CSI DeleteSnapshot: {}", req.snapshot_id);
 
-        let snap_info = {
+        let snap = {
             let snapshots = self.snapshots.read().await;
             snapshots.get(&req.snapshot_id).cloned()
-        };
+        }.ok_or_else(|| Status::not_found(format!("Snapshot {} not found", req.snapshot_id)))?;
 
-        let snap_info = snap_info.ok_or_else(|| {
-            Status::not_found(format!("Snapshot {} not found", req.snapshot_id))
-        })?;
-
-        // Delete btrfs snapshot
-        let snap_path = format!("{}/{}", self.data_dir, snap_info.name);
-        let output = tokio::process::Command::new("btrfs")
+        let snap_path = format!("{}/{}", self.data_dir, snap.name);
+        let _ = tokio::process::Command::new("btrfs")
             .args(["subvolume", "delete", &snap_path])
             .output()
-            .await
-            .map_err(|e| Status::internal(format!("Failed to execute btrfs: {}", e)))?;
+            .await;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!("Failed to delete snapshot: {}", stderr);
-        }
-
-        {
-            let mut snapshots = self.snapshots.write().await;
-            snapshots.remove(&req.snapshot_id);
-        }
+        { self.snapshots.write().await.remove(&req.snapshot_id); }
 
         Ok(Response::new(DeleteSnapshotResponse {}))
     }
 
     async fn list_snapshots(
         &self,
-        request: Request<ListSnapshotsRequest>,
+        _request: Request<ListSnapshotsRequest>,
     ) -> Result<Response<ListSnapshotsResponse>, Status> {
-        tracing::debug!("CSI ListSnapshots");
-
         let snapshots = self.snapshots.read().await;
-        let entries: Vec<list_snapshots_response::Entry> = snapshots
-            .values()
-            .map(|s| list_snapshots_response::Entry {
-                snapshot: Some(crate::csi::Snapshot {
+        let entries: Vec<list_snapshots_response::Entry> = snapshots.values().map(|s| {
+            list_snapshots_response::Entry {
+                snapshot: Some(Snapshot {
                     snapshot_id: s.id.clone(),
                     source_volume_id: s.source_volume_id.clone(),
                     creation_time: s.creation_time,
                     size_bytes: s.size as i64,
-                    snapshot_context: HashMap::new(),
+                    ..Default::default()
                 }),
-            })
-            .collect();
+            }
+        }).collect();
 
-        Ok(Response::new(ListSnapshotsResponse {
-            entries,
-            next_token: String::new(),
-        }))
+        Ok(Response::new(ListSnapshotsResponse { entries, next_token: String::new() }))
     }
 
     async fn controller_expand_volume(
@@ -486,14 +342,9 @@ impl Controller for CsiController {
         request: Request<ControllerExpandVolumeRequest>,
     ) -> Result<Response<ControllerExpandVolumeResponse>, Status> {
         let req = request.into_inner();
-        tracing::info!("CSI ControllerExpandVolume: volume_id={}", req.volume_id);
+        tracing::info!("CSI ControllerExpandVolume: {}", req.volume_id);
 
-        // Btrfs supports online resize, report that node expansion is required
-        let new_capacity = req
-            .capacity_range
-            .as_ref()
-            .map(|r| r.required_bytes)
-            .unwrap_or(0);
+        let new_capacity = req.capacity_range.as_ref().map(|r| r.required_bytes).unwrap_or(0);
 
         Ok(Response::new(ControllerExpandVolumeResponse {
             capacity_bytes: new_capacity,
@@ -513,41 +364,24 @@ impl Controller for CsiController {
                 volume: Some(Volume {
                     volume_id: v.id.clone(),
                     capacity_bytes: v.size as i64,
-                    volume_capabilities: None,
-                    volume_context: HashMap::new(),
-                    parameters: HashMap::new(),
-                    content_source_volume_id: String::new(),
-                    content_source_snapshot_id: String::new(),
-                    accessible_topology: vec![],
+                    ..Default::default()
                 }),
                 status: Some(VolumeStatus {
                     volume_id: v.id.clone(),
-                    node_id: vec![v.node_id.clone()],
-                    accessible_topology: vec![],
+                    ..Default::default()
                 }),
             })),
-            None => Err(Status::not_found(format!(
-                "Volume {} not found",
-                req.volume_id
-            ))),
+            None => Err(Status::not_found(format!("Volume {} not found", req.volume_id))),
         }
     }
 }
 
 fn parse_btrfs_free_space(output: &str) -> u64 {
     for line in output.lines() {
-        if line.contains("Free (estimated):") {
+        if line.contains("Free (estimated):") || line.contains("Free:") {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 3 {
-                if let Ok(val) = parts[2].parse::<u64>() {
-                    return val;
-                }
-            }
-        }
-        if line.contains("Free:") {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 2 {
-                if let Ok(val) = parts[1].parse::<u64>() {
+            if let Some(s) = parts.last() {
+                if let Ok(val) = s.parse::<u64>() {
                     return val;
                 }
             }
