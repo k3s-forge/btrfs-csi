@@ -54,84 +54,76 @@ jobs:
 
       - name: Write receiver config
         run: |
-          cat > /tmp/receiver-config.toml << 'RECEIVER_EOF'
-node_id = "receiver-node"
-listen_addr = "127.0.0.1"
-listen_port = 9201
-zone = "test"
-auth_key = "test-key-for-e2e-replication-2026"
-seed_nodes = []
-gossip_interval = 10
-heartbeat_interval = 30
-node_timeout = 90
-
-[replication]
-default_replica_count = 1
-default_interval = 30
-max_concurrent = 4
-data_dir = "/mnt/btrfs/receiver-data"
-snapshot_dir = "/mnt/btrfs/receiver-snapshots"
-enable_incremental = true
-
-[replication.database]
-enabled = true
-sqlite_wal_mode = true
-checkpoint_interval = 30
-enable_nocow = false
-
-[maintenance]
-enabled = false
-balance_schedule = "0 2 * * *"
-balance_threshold = 0.7
-scrub_schedule = "0 3 * * 0"
-snapshot_cleanup_schedule = "0 4 * * *"
-
-[maintenance.snapshot_retention]
-daily = 7
-weekly = 4
-monthly = 3
-RECEIVER_EOF
+          printf '%s\n' \
+            'node_id = "receiver-node"' \
+            'listen_addr = "127.0.0.1"' \
+            'listen_port = 9201' \
+            'zone = "test"' \
+            'auth_key = "test-key-for-e2e-replication-2026"' \
+            'seed_nodes = []' \
+            'gossip_interval = 10' \
+            'heartbeat_interval = 30' \
+            'node_timeout = 90' \
+            '[replication]' \
+            'default_replica_count = 1' \
+            'default_interval = 30' \
+            'max_concurrent = 4' \
+            'data_dir = "/mnt/btrfs/receiver-data"' \
+            'snapshot_dir = "/mnt/btrfs/receiver-snapshots"' \
+            'enable_incremental = true' \
+            '[replication.database]' \
+            'enabled = true' \
+            'sqlite_wal_mode = true' \
+            'checkpoint_interval = 30' \
+            'enable_nocow = false' \
+            '[maintenance]' \
+            'enabled = false' \
+            'balance_schedule = "0 2 * * *"' \
+            'balance_threshold = 0.7' \
+            'scrub_schedule = "0 3 * * 0"' \
+            'snapshot_cleanup_schedule = "0 4 * * *"' \
+            '[maintenance.snapshot_retention]' \
+            'daily = 7' \
+            'weekly = 4' \
+            'monthly = 3' \
+            | sudo tee /tmp/receiver-config.toml > /dev/null
           echo "Receiver config written"
 
       - name: Write sender config
         run: |
-          cat > /tmp/sender-config.toml << 'SENDER_EOF'
-node_id = "sender-node"
-listen_addr = "127.0.0.1"
-listen_port = 9200
-zone = "test"
-auth_key = "test-key-for-e2e-replication-2026"
-seed_nodes = ["127.0.0.1:9201"]
-gossip_interval = 10
-heartbeat_interval = 30
-node_timeout = 90
-
-[replication]
-default_replica_count = 1
-default_interval = 30
-max_concurrent = 4
-data_dir = "/mnt/btrfs/sender-data"
-snapshot_dir = "/mnt/btrfs/sender-snapshots"
-enable_incremental = true
-
-[replication.database]
-enabled = true
-sqlite_wal_mode = true
-checkpoint_interval = 30
-enable_nocow = false
-
-[maintenance]
-enabled = false
-balance_schedule = "0 2 * * *"
-balance_threshold = 0.7
-scrub_schedule = "0 3 * * 0"
-snapshot_cleanup_schedule = "0 4 * * *"
-
-[maintenance.snapshot_retention]
-daily = 7
-weekly = 4
-monthly = 3
-SENDER_EOF
+          printf '%s\n' \
+            'node_id = "sender-node"' \
+            'listen_addr = "127.0.0.1"' \
+            'listen_port = 9200' \
+            'zone = "test"' \
+            'auth_key = "test-key-for-e2e-replication-2026"' \
+            'seed_nodes = ["127.0.0.1:9201"]' \
+            'gossip_interval = 10' \
+            'heartbeat_interval = 30' \
+            'node_timeout = 90' \
+            '[replication]' \
+            'default_replica_count = 1' \
+            'default_interval = 30' \
+            'max_concurrent = 4' \
+            'data_dir = "/mnt/btrfs/sender-data"' \
+            'snapshot_dir = "/mnt/btrfs/sender-snapshots"' \
+            'enable_incremental = true' \
+            '[replication.database]' \
+            'enabled = true' \
+            'sqlite_wal_mode = true' \
+            'checkpoint_interval = 30' \
+            'enable_nocow = false' \
+            '[maintenance]' \
+            'enabled = false' \
+            'balance_schedule = "0 2 * * *"' \
+            'balance_threshold = 0.7' \
+            'scrub_schedule = "0 3 * * 0"' \
+            'snapshot_cleanup_schedule = "0 4 * * *"' \
+            '[maintenance.snapshot_retention]' \
+            'daily = 7' \
+            'weekly = 4' \
+            'monthly = 3' \
+            | sudo tee /tmp/sender-config.toml > /dev/null
           echo "Sender config written"
 
       - name: Start receiver CSI driver
@@ -197,7 +189,7 @@ SENDER_EOF
             exit 1
           fi
 
-      - name: Test 1: Create volume and write data on sender
+      - name: "Test 1 - Create volume and write data on sender"
         run: |
           echo "=== Creating test subvolume on sender ==="
           sudo btrfs subvolume create /mnt/btrfs/sender-data/test-vol
@@ -217,7 +209,7 @@ SENDER_EOF
           echo "Sender checksum: $SENDER_SHA"
           echo "$SENDER_SHA" > /tmp/sender-checksum.txt
 
-      - name: Test 2: Create snapshot and replicate
+      - name: "Test 2 - Create snapshot and replicate"
         run: |
           echo "=== Creating readonly snapshot ==="
           sudo btrfs subvolume snapshot -r /mnt/btrfs/sender-data/test-vol /mnt/btrfs/sender-snapshots/test-vol-snap
@@ -234,7 +226,7 @@ SENDER_EOF
           echo "Receiver checksum: $RECEIVER_SHA"
           echo "$RECEIVER_SHA" > /tmp/receiver-checksum.txt
 
-      - name: Test 3: Verify data integrity
+      - name: "Test 3 - Verify data integrity"
         run: |
           echo "=== Comparing checksums ==="
           SENDER_SHA=$(cat /tmp/sender-checksum.txt)
@@ -272,7 +264,7 @@ SENDER_EOF
             exit 1
           fi
 
-      - name: Test 4: Incremental replication
+      - name: "Test 4 - Incremental replication"
         run: |
           echo "=== Writing more data to sender ==="
           dd if=/dev/urandom of=/mnt/btrfs/sender-data/test-vol/incremental.bin bs=1M count=5 2>&1
