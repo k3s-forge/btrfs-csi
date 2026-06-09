@@ -17,7 +17,7 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y btrfs-progs fio jq
+        sudo apt-get install -y btrfs-progs fio jq protobuf-compiler
 
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
@@ -90,7 +90,6 @@ jobs:
         sudo btrfs subvolume create /mnt/stress/data/snap-src > /dev/null 2>&1
         sudo dd if=/dev/urandom of=/mnt/stress/data/snap-src/testfile bs=1M count=100 2>/dev/null
         sudo sync
-
         echo "Creating 100 snapshots..."
         START=$(date +%s%N)
         for i in $(seq 1 100); do
@@ -112,7 +111,6 @@ jobs:
           sudo dd if=/dev/urandom of=/mnt/stress/data/rep-test/data.bin bs=1M count=$size 2>/dev/null
           sudo sync
           sudo btrfs subvolume snapshot -r /mnt/stress/data/rep-test /mnt/stress/rep-snap > /dev/null 2>&1
-
           START=$(date +%s%N)
           BYTES=$(sudo btrfs send /mnt/stress/rep-snap 2>/dev/null | wc -c)
           END=$(date +%s%N)
@@ -124,7 +122,6 @@ jobs:
             RATE=9999
           fi
           echo "  Sent ${MB}MB in ${DURATION}ms = ${RATE}MB/s"
-
           sudo btrfs subvolume delete /mnt/stress/data/rep-test 2>/dev/null || true
           sudo btrfs subvolume delete /mnt/stress/rep-snap 2>/dev/null || true
         done
@@ -137,20 +134,17 @@ jobs:
         sudo dd if=/dev/urandom of=/mnt/stress/data/inc-test/base.bin bs=1M count=512 2>/dev/null
         sudo sync
         sudo btrfs subvolume snapshot -r /mnt/stress/data/inc-test /mnt/stress/inc-snap0 > /dev/null 2>&1
-
         echo "Full send baseline (512MB)..."
         START=$(date +%s%N)
         sudo btrfs send /mnt/stress/inc-snap0 2>/dev/null | wc -c
         END=$(date +%s%N)
         BASE_MS=$(( (END - START) / 1000000 ))
         echo "  Full: ${BASE_MS}ms"
-
         for round in 1 2 3 4 5; do
           DELTA=$((round * 50))
           sudo dd if=/dev/urandom of=/mnt/stress/data/inc-test/delta.bin bs=1M count=$DELTA 2>/dev/null
           sudo sync
           sudo btrfs subvolume snapshot -r /mnt/stress/data/inc-test /mnt/stress/inc-snap$round > /dev/null 2>&1
-
           START=$(date +%s%N)
           BYTES=$(sudo btrfs send -p /mnt/stress/inc-snap$((round-1)) /mnt/stress/inc-snap$round 2>/dev/null | wc -c)
           END=$(date +%s%N)
@@ -158,7 +152,6 @@ jobs:
           KB=$((BYTES / 1024))
           echo "  Round $round: +${DELTA}MB delta, sent ${KB}KB in ${DURATION}ms"
         done
-
         for i in $(seq 0 5); do
           sudo btrfs subvolume delete /mnt/stress/inc-snap$i 2>/dev/null || true
         done
