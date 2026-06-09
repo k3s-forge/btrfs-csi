@@ -42,16 +42,29 @@ jobs:
             'data_dir = "/tmp/nomad/server/data"' \
             'bind_addr = "127.0.0.1"' \
             'log_level = "INFO"' \
-            'server { enabled = true; bootstrap_expect = 1 }' \
-            'ports { http = 14646; rpc = 14647; serf = 14648 }' \
+            'server {' \
+            '  enabled = true' \
+            '  bootstrap_expect = 1' \
+            '}' \
+            'ports {' \
+            '  http = 14646' \
+            '  rpc = 14647' \
+            '  serf = 14648' \
+            '}' \
             | sudo tee /tmp/nomad/server.hcl > /dev/null
+          SERVER_OK=""
           nomad agent -config=/tmp/nomad/server.hcl > /tmp/nomad-server.log 2>&1 &
           for i in $(seq 1 30); do
             if curl -s http://127.0.0.1:14646/v1/status/leader 2>/dev/null | grep -q '"'; then
-              echo "Server ready"; break
+              echo "Server ready"; SERVER_OK="yes"; break
             fi
             sleep 2
           done
+          if [ -z "$SERVER_OK" ]; then
+            echo "=== Server failed to start! ==="
+            sudo cat /tmp/nomad-server.log || true
+            exit 1
+          fi
       - name: Start Nomad client
         run: |
           mkdir -p /tmp/nomad/client/data
@@ -70,8 +83,16 @@ jobs:
             '  }' \
             '}' \
             'plugin "raw_exec" { config { enabled = true } }' \
-            'ports { http = 24646; rpc = 24647; serf = 24648 }' \
-            'advertise { http = "127.0.0.1"; rpc = "127.0.0.1"; serf = "127.0.0.1" }' \
+            'ports {' \
+            '  http = 24646' \
+            '  rpc = 24647' \
+            '  serf = 24648' \
+            '}' \
+            'advertise {' \
+            '  http = "127.0.0.1"' \
+            '  rpc = "127.0.0.1"' \
+            '  serf = "127.0.0.1"' \
+            '}' \
             | sudo tee /tmp/nomad/client.hcl > /dev/null
           NOMAD_ADDR=http://127.0.0.1:14646 nomad agent -config=/tmp/nomad/client.hcl > /tmp/nomad-client.log 2>&1 &
           for i in $(seq 1 30); do
