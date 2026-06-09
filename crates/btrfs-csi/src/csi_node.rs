@@ -4,7 +4,9 @@ use tonic::{Request, Response, Status};
 
 use crate::csi::node_server::Node;
 use crate::csi::*;
+use crate::csi::node_get_volume_stats_response as ngvsr;
 
+#[derive(Clone)]
 pub struct CsiNode {
     node_id: String,
     zone: String,
@@ -122,12 +124,12 @@ impl Node for CsiNode {
         let (total, used) = parse_btrfs_usage(&stdout);
 
         Ok(Response::new(NodeGetVolumeStatsResponse {
-            usage: vec![node_get_volume_stats_response::VolumeUsage {
+            usage: Some(ngvsr::VolumeUsage {
                 available: (total - used) as i64,
                 total: total as i64,
                 used: used as i64,
-                r#unit: node_get_volume_stats_response::volume_usage::Unit::Bytes as i32,
-            }],
+                r#type: ngvsr::volume_usage::Unit::Bytes.into(),
+            }),
             ..Default::default()
         }))
     }
@@ -148,12 +150,12 @@ impl Node for CsiNode {
         &self,
         _request: Request<NodeGetCapabilitiesRequest>,
     ) -> Result<Response<NodeGetCapabilitiesResponse>, Status> {
-        use crate::csi::node_get_capabilities_response::node_capability;
+        use crate::csi::node_get_capabilities_response as ngcr;
 
         Ok(Response::new(NodeGetCapabilitiesResponse {
-            capabilities: vec![node_capability::NodeCapability {
-                r#type: Some(node_capability::Type::Service(node_capability::Service {
-                    r#type: node_capability::service::Type::StageUnstageVolume as i32,
+            capabilities: vec![ngcr::NodeCapability {
+                r#type: Some(ngcr::node_capability::Type::Service(ngcr::Service {
+                    r#type: ngcr::service::Type::StageUnstageVolume.into(),
                 })),
             }],
         }))
