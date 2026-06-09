@@ -33,30 +33,19 @@ impl CsiGrpcServer {
         Self {
             endpoint,
             identity: CsiIdentity::new(node_id.clone()),
-            controller: CsiController::new(
-                node_id.clone(),
-                zone.clone(),
-                data_dir.clone(),
-                gossip,
-                replicator,
-            ),
+            controller: CsiController::new(node_id.clone(), zone.clone(), data_dir.clone(), gossip, replicator),
             node: CsiNode::new(node_id, zone, data_dir),
         }
     }
 
     pub async fn serve(&self) -> Result<()> {
-        // Parse endpoint
         let endpoint = self.endpoint.clone();
 
         if endpoint.starts_with("unix://") {
-            // Unix socket
             let socket_path = endpoint.trim_start_matches("unix://");
             tracing::info!("CSI gRPC server starting on unix://{}", socket_path);
 
-            // Remove old socket file if exists
             let _ = tokio::fs::remove_file(socket_path).await;
-
-            // Create parent directory
             if let Some(parent) = std::path::Path::new(socket_path).parent() {
                 tokio::fs::create_dir_all(parent).await?;
             }
@@ -71,7 +60,6 @@ impl CsiGrpcServer {
                 .serve_with_incoming(stream)
                 .await?;
         } else {
-            // TCP fallback
             let addr: std::net::SocketAddr = endpoint.parse()?;
             tracing::info!("CSI gRPC server starting on tcp://{}", addr);
 
