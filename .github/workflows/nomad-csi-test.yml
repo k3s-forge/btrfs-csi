@@ -39,16 +39,6 @@ jobs:
         sudo mount -o loop /tmp/btrfs-replica.img /mnt/btrfs/replica-data
         df -h /mnt/btrfs/data /mnt/btrfs/replica-data
 
-    - name: Create CSI entrypoint
-      run: |
-        IyEvYmluL2Jhc2gKc2V0IC1lCk5PREVfTkFNRT0iJHtOT01B RF9NRVRBX05PREVfTkFNRTotdW5rbm93bn0iCkNT SV9FTkRQT0lOVD0iJHtDU0lfRU5EUE9JTlQ6LXVuaXg6Ly8v dmFyL3RtcC9jc2kvY3NpLnNvY2t9IgpEQVRBX0RJUj0iJHtOT01BRF9NRVRBX0RBVEFfRElSOi0vbW50L2J0cmZzL2RhdGF9IgpTTkFQX0RJUj0iJHtOT01BRF9NRVRBX1NOQVBfRElSOi0vbW50L2J0cmZzL3NuYXBzaG90c30iCgpta2RpciAtcCAvdmFyL3RtcC9jc2kKCmNhdCA+IC90bXAvYnRyZnMtY3NpLWNvbmZpZy0ke05PREVfTkFNZX0udG9tbCA8PCB DT05GRU9GCm5vZGVfaWQgPSAiJHtOT0RFX05BTUV9Igp6b25lID0gImRjMSIKYXV0aF9rZXkgPSAidGVzdC1rZXktZm9yLW5vbWFkLWNzaS10ZXN0aW5nLTIwMjYiCnNlZWRfbm9kZXMgPSBbXQpnb3NzaXBfaW50ZXJ2YWwgPSAxMApoZWFydGJlYXRfaW50ZXJ2YWwgPSAzMApub2RlX3RpbWVvdXQgPSA5MAoKW3JlcGxpY2F0aW9uXQpkZWZhdWx0X3JlcGxpY2FfY291bnQgPSAxCmRlZmF1bHRfaW50ZXJ2YWwgPSAzMAptYXhfY29uY3VycmVudCA9IDQKZGF0YV9kaXIgPSAiJHtEQVRBX0RJUn0iCnNuYXBzaG90X2RpciA9ICIke1NOQVBfRElSfSIKZW5hYmxlX2luY3JlbWVudGFsID0gdHJ1ZQoKW21haW50ZW5hbmNlXQplbmFibGVkID0gZmFsc2UKQ09ORkVPRg==
-        echo "Base64 wrapper generated" | sudo tee /tmp/btrfs-wrapper.b64 > /dev/null
-        # Write the entrypoint script to a file
-        Write the entrypoint script
-        
-        # Actually, let me just write it directly
-        echo "done" > /dev/null
-
     - name: Write entrypoint script
       run: |
         sudo tee /usr/local/bin/btrfs-csi-entrypoint.sh > /dev/null << 'WRAPPER'
