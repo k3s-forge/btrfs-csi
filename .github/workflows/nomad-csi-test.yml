@@ -110,15 +110,17 @@ jobs:
       - name: Deploy CSI plugin
         run: |
           echo 'am9iICJidHJmcy1jc2kiIHsKICB0eXBlID0gInN5c3RlbSIKICBkYXRhY2VudGVycyA9IFsiZGMxIl0KICBncm91cCAibm9kZXMiIHsKICAgIHRhc2sgInBsdWdpbiIgewogICAgICBkcml2ZXIgPSAicmF3X2V4ZWMiCiAgICAgIGNvbmZpZyB7IGNvbW1hbmQgPSAiL3Vzci9sb2NhbC9iaW4vYnRyZnMtY3NpLWVudHJ5cG9pbnQuc2giIH0KICAgICAgY3NpX3BsdWdpbiB7CiAgICAgICAgaWQgPSAiYnRyZnMtY3NpIgogICAgICAgIHR5cGUgPSAibW9ub2xpdGgiCiAgICAgICAgbW91bnRfZGlyID0gIi92YXIvdG1wL2NzaSIKICAgICAgICBoZWFsdGhfdGltZW91dCA9ICIxMjBzIgogICAgICB9CiAgICAgIHJlc291cmNlcyB7CiAgICAgICAgY3B1ID0gNTAwCiAgICAgICAgbWVtb3J5ID0gMjU2CiAgICAgIH0KICAgIH0KICB9Cn0=' | base64 -d | sudo tee /tmp/csi-plugin.nomad > /dev/null && NOMAD_ADDR=http://127.0.0.1:14646 nomad job run /tmp/csi-plugin.nomad
-          for i in $(seq 1 30); do
-            sleep 5
-            PLUGIN_OK=$(NOMAD_ADDR=http://127.0.0.1:14646 nomad plugin status btrfs-csi 2>/dev/null || true)
-            if echo "$PLUGIN_OK" | grep -q "Controllers Healthy"; then
-              echo "=== CSI Plugin Registered! ==="
-              NOMAD_ADDR=http://127.0.0.1:14646 nomad plugin status btrfs-csi; break
-            fi
-            echo "  Waiting for plugin... ($i)"
-          done
+           for i in $(seq 1 60); do
+             sleep 5
+             PLUGIN_OK=$(NOMAD_ADDR=http://127.0.0.1:14646 nomad plugin status btrfs-csi 2>/dev/null || true)
+             CTRL_HEALTHY=$(echo "$PLUGIN_OK" | grep "Controllers Healthy" | awk '{print $3}')
+             NODE_HEALTHY=$(echo "$PLUGIN_OK" | grep "Nodes Healthy" | awk '{print $3}')
+             if [ -n "$CTRL_HEALTHY" ] && [ "$CTRL_HEALTHY" -gt 0 ] && [ -n "$NODE_HEALTHY" ] && [ "$NODE_HEALTHY" -gt 0 ]; then
+               echo "=== CSI Plugin Healthy! ==="
+               NOMAD_ADDR=http://127.0.0.1:14646 nomad plugin status btrfs-csi; break
+             fi
+             echo "  Waiting for plugin health... ($i) Ctrl=$CTRL_HEALTHY Node=$NODE_HEALTHY"
+           done
           NOMAD_ADDR=http://127.0.0.1:14646 nomad job status btrfs-csi
       - name: "Test A: Create Volume"
         continue-on-error: true
@@ -157,7 +159,10 @@ jobs:
             '      driver = "raw_exec"' \
             '      config { command = "/bin/bash"; args = ["-c", "echo HELLO_NOMAD_CSI > /data/hello.txt; sync; cat /data/hello.txt"] }' \
             '      volume_mount { volume = "data"; destination = "/data" }' \
-            '      resources { cpu = 100; memory = 32 }' \
+            '      resources {' \
+            '        cpu = 100' \
+            '        memory = 32' \
+            '      }' \
             '    }' \
             '  }' \
             '}' \
@@ -190,7 +195,10 @@ jobs:
             '      driver = "raw_exec"' \
             '      config { command = "/bin/bash"; args = ["-c", "cat /data/hello.txt"] }' \
             '      volume_mount { volume = "data"; destination = "/data" }' \
-            '      resources { cpu = 100; memory = 32 }' \
+            '      resources {' \
+            '        cpu = 100' \
+            '        memory = 32' \
+            '      }' \
             '    }' \
             '  }' \
             '}' \
