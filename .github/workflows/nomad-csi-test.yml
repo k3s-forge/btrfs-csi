@@ -45,7 +45,7 @@ jobs:
             'server { enabled = true; bootstrap_expect = 1 }' \
             'ports { http = 14646; rpc = 14647; serf = 14648 }' \
             | sudo tee /tmp/nomad/server.hcl > /dev/null
-          sudo nomad agent -config=/tmp/nomad/server.hcl > /tmp/nomad-server.log 2>&1 &
+          nomad agent -config=/tmp/nomad/server.hcl > /tmp/nomad-server.log 2>&1 &
           for i in $(seq 1 30); do
             if curl -s http://127.0.0.1:14646/v1/status/leader 2>/dev/null | grep -q '"'; then
               echo "Server ready"; break
@@ -73,14 +73,14 @@ jobs:
             'ports { http = 24646; rpc = 24647; serf = 24648 }' \
             'advertise { http = "127.0.0.1"; rpc = "127.0.0.1"; serf = "127.0.0.1" }' \
             | sudo tee /tmp/nomad/client.hcl > /dev/null
-          NOMAD_ADDR=http://127.0.0.1:14646 sudo nomad agent -config=/tmp/nomad/client.hcl > /tmp/nomad-client.log 2>&1 &
-          for i in $(seq 1 15); do
+          NOMAD_ADDR=http://127.0.0.1:14646 nomad agent -config=/tmp/nomad/client.hcl > /tmp/nomad-client.log 2>&1 &
+          for i in $(seq 1 30); do
             sleep 3
             NODES=$(NOMAD_ADDR=http://127.0.0.1:14646 nomad node status 2>/dev/null | grep -c "ready" || true)
             if [ "$NODES" -ge 1 ]; then echo "Client ready"; NOMAD_ADDR=http://127.0.0.1:14646 nomad node status; break; fi
             echo "  Waiting for client... ($i)"
           done
-          sudo cat /tmp/nomad-client.log || echo "No client log"
+          cat /tmp/nomad-client.log || echo "No client log"
       - name: Deploy CSI plugin
         run: |
           echo 'am9iICJidHJmcy1jc2kiIHsKICB0eXBlID0gInN5c3RlbSIKICBkYXRhY2VudGVycyA9IFsiZGMxIl0KICBncm91cCAibm9kZXMiIHsKICAgIHRhc2sgInBsdWdpbiIgewogICAgICBkcml2ZXIgPSAicmF3X2V4ZWMiCiAgICAgIGNvbmZpZyB7IGNvbW1hbmQgPSAiL3Vzci9sb2NhbC9iaW4vYnRyZnMtY3NpLWVudHJ5cG9pbnQuc2giIH0KICAgICAgY3NpX3BsdWdpbiB7CiAgICAgICAgaWQgPSAiYnRyZnMtY3NpIgogICAgICAgIHR5cGUgPSAibW9ub2xpdGgiCiAgICAgICAgbW91bnRfZGlyID0gIi92YXIvdG1wL2NzaSIKICAgICAgICBoZWFsdGhfdGltZW91dCA9ICIxMjBzIgogICAgICB9CiAgICAgIHJlc291cmNlcyB7CiAgICAgICAgY3B1ID0gNTAwCiAgICAgICAgbWVtb3J5ID0gMjU2CiAgICAgIH0KICAgIH0KICB9Cn0=' | base64 -d | sudo tee /tmp/csi-plugin.nomad > /dev/null && NOMAD_ADDR=http://127.0.0.1:14646 nomad job run /tmp/csi-plugin.nomad
