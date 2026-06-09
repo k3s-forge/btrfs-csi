@@ -4,5 +4,5 @@ pub mod csi_node;
 pub mod csi_server;
 
 pub mod csi {
-    tonic::include_proto!("csi.v1");
+    tonic::include_proto!("csi");
 }
