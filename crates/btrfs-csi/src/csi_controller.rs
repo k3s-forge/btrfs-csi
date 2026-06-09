@@ -1,13 +1,18 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tonic::{Request, Response, Status};
 
+use btrfs_exchange::config::VolumeProfile;
 use btrfs_exchange::gossip::GossipService;
 use btrfs_exchange::replicator::Replicator;
 
 use crate::csi::controller_server::Controller;
 use crate::csi::*;
+
+const VOLUMES_FILE: &str = "volumes.json";
+const SNAPSHOTS_FILE: &str = "snapshots.json";
 
 #[derive(Clone)]
 pub struct CsiController {
@@ -18,18 +23,20 @@ pub struct CsiController {
     replicator: Arc<Replicator>,
     volumes: Arc<RwLock<HashMap<String, VolInfo>>>,
     snapshots: Arc<RwLock<HashMap<String, SnapInfo>>>,
+    volume_profiles: HashMap<String, VolumeProfile>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct VolInfo {
     id: String,
     name: String,
     size: u64,
     node_id: String,
     zone: String,
+    profile_type: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct SnapInfo {
     id: String,
     source_volume_id: String,
@@ -45,6 +52,7 @@ impl CsiController {
         data_dir: String,
         gossip: Arc<GossipService>,
         replicator: Arc<Replicator>,
+        volume_profiles: HashMap<String, VolumeProfile>,
     ) -> Self {
         Self {
             node_id,
@@ -54,7 +62,71 @@ impl CsiController {
             replicator,
             volumes: Arc::new(RwLock::new(HashMap::new())),
             snapshots: Arc::new(RwLock::new(HashMap::new())),
+            volume_profiles,
         }
+    }
+
+    fn volumes_path(&self) -> PathBuf {
+        PathBuf::from(&self.data_dir).join(VOLUMES_FILE)
+    }
+
+    fn snapshots_path(&self) -> PathBuf {
+        PathBuf::from(&self.data_dir).join(SNAPSHOTS_FILE)
+    }
+
+    pub async fn load_from_disk(&self) {
+        match tokio::fs::read_to_string(self.volumes_path()).await {
+            Ok(content) => {
+                match serde_json::from_str::<HashMap<String, VolInfo>>(&content) {
+                    Ok(vols) => {
+                        tracing::info!("Loaded {} volumes from disk", vols.len());
+                        *self.volumes.write().await = vols;
+                    }
+                    Err(e) => tracing::warn!("Failed to parse volumes.json: {}", e),
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::info!("No volumes.json found, starting fresh");
+            }
+            Err(e) => tracing::warn!("Failed to read volumes.json: {}", e),
+        }
+
+        match tokio::fs::read_to_string(self.snapshots_path()).await {
+            Ok(content) => {
+                match serde_json::from_str::<HashMap<String, SnapInfo>>(&content) {
+                    Ok(snaps) => {
+                        tracing::info!("Loaded {} snapshots from disk", snaps.len());
+                        *self.snapshots.write().await = snaps;
+                    }
+                    Err(e) => tracing::warn!("Failed to parse snapshots.json: {}", e),
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::info!("No snapshots.json found, starting fresh");
+            }
+            Err(e) => tracing::warn!("Failed to read snapshots.json: {}", e),
+        }
+    }
+
+    async fn persist_volumes(&self) -> Result<(), std::io::Error> {
+        let vols = self.volumes.read().await;
+        let json = serde_json::to_string_pretty(&*vols)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        tokio::fs::write(self.volumes_path(), json).await
+    }
+
+    async fn persist_snapshots(&self) -> Result<(), std::io::Error> {
+        let snaps = self.snapshots.read().await;
+        let json = serde_json::to_string_pretty(&*snaps)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        tokio::fs::write(self.snapshots_path(), json).await
+    }
+
+    fn get_profile(&self, profile_type: &str) -> &VolumeProfile {
+        self.volume_profiles
+            .get(profile_type)
+            .or_else(|| self.volume_profiles.get("default"))
+            .expect("default volume profile must exist")
     }
 }
 
@@ -73,10 +145,12 @@ impl Controller for CsiController {
             .map(|r| r.required_bytes as u64)
             .unwrap_or(1024 * 1024 * 1024);
 
+        // Idempotency: check in-memory first
         {
             let volumes = self.volumes.read().await;
             if let Some(existing) = volumes.values().find(|v| v.name == req.name) {
                 if existing.size >= capacity {
+                    tracing::info!("Volume {} already exists (id={})", req.name, existing.id);
                     return Ok(Response::new(CreateVolumeResponse {
                         volume: Some(Volume {
                             volume_id: existing.id.clone(),
@@ -90,15 +164,52 @@ impl Controller for CsiController {
         }
 
         let subvol_path = format!("{}/{}", self.data_dir, req.name);
-        let output = tokio::process::Command::new("btrfs")
-            .args(["subvolume", "create", &subvol_path])
+
+        // Check if subvolume already exists on filesystem (crash recovery scenario)
+        let subvol_exists = tokio::process::Command::new("btrfs")
+            .args(["subvolume", "show", &subvol_path])
             .output()
             .await
-            .map_err(|e| Status::internal(format!("Failed to execute btrfs: {}", e)))?;
+            .map(|o| o.status.success())
+            .unwrap_or(false);
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(Status::internal(format!("Failed to create subvolume: {}", stderr)));
+        if subvol_exists {
+            tracing::info!("Subvolume {} already exists on filesystem, reusing", req.name);
+        } else {
+            let output = tokio::process::Command::new("btrfs")
+                .args(["subvolume", "create", &subvol_path])
+                .output()
+                .await
+                .map_err(|e| Status::internal(format!("Failed to execute btrfs: {}", e)))?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                // One more idempotency check: race with concurrent create
+                let volumes = self.volumes.read().await;
+                if let Some(existing) = volumes.values().find(|v| v.name == req.name) {
+                    return Ok(Response::new(CreateVolumeResponse {
+                        volume: Some(Volume {
+                            volume_id: existing.id.clone(),
+                            capacity_bytes: existing.size as i64,
+                            volume_capabilities: req.volume_capabilities.clone(),
+                            ..Default::default()
+                        }),
+                    }));
+                }
+                return Err(Status::internal(format!("Failed to create subvolume: {}", stderr)));
+            }
+        }
+
+        // Determine profile type from volume capabilities
+        let profile_type = "default".to_string();
+        let profile = self.get_profile(&profile_type);
+
+        // Apply NOCOW if profile requests it
+        if profile.nocow {
+            let _ = tokio::process::Command::new("chattr")
+                .args(["+N", &subvol_path])
+                .output()
+                .await;
         }
 
         let volume_id = format!("vol-{}", uuid::Uuid::new_v4());
@@ -108,9 +219,14 @@ impl Controller for CsiController {
             size: capacity,
             node_id: self.node_id.clone(),
             zone: self.zone.clone(),
+            profile_type,
         };
 
-        { self.volumes.write().await.insert(volume_id.clone(), vol); }
+        self.volumes.write().await.insert(volume_id.clone(), vol);
+
+        if let Err(e) = self.persist_volumes().await {
+            tracing::error!("Failed to persist volumes: {}", e);
+        }
 
         tracing::info!("Volume {} created (id={})", req.name, volume_id);
 
@@ -134,17 +250,38 @@ impl Controller for CsiController {
         let vol = {
             let volumes = self.volumes.read().await;
             volumes.get(&req.volume_id).cloned()
-        }.ok_or_else(|| Status::not_found(format!("Volume {} not found", req.volume_id)))?;
+        };
 
-        let subvol_path = format!("{}/{}", self.data_dir, vol.name);
-        let _ = tokio::process::Command::new("btrfs")
-            .args(["subvolume", "delete", &subvol_path])
-            .output()
-            .await;
+        match vol {
+            Some(vol) => {
+                let subvol_path = format!("{}/{}", self.data_dir, vol.name);
+                let output = tokio::process::Command::new("btrfs")
+                    .args(["subvolume", "delete", &subvol_path])
+                    .output()
+                    .await;
 
-        { self.volumes.write().await.remove(&req.volume_id); }
+                match output {
+                    Ok(o) if !o.status.success() => {
+                        let stderr = String::from_utf8_lossy(&o.stderr);
+                        tracing::error!("Failed to delete subvolume {}: {}", vol.name, stderr);
+                    }
+                    Err(e) => tracing::error!("Failed to execute btrfs delete: {}", e),
+                    _ => {}
+                }
 
-        Ok(Response::new(DeleteVolumeResponse {}))
+                self.volumes.write().await.remove(&req.volume_id);
+                if let Err(e) = self.persist_volumes().await {
+                    tracing::error!("Failed to persist volumes: {}", e);
+                }
+
+                Ok(Response::new(DeleteVolumeResponse {}))
+            }
+            None => {
+                // Volume not in memory; check filesystem directly for idempotency
+                tracing::warn!("Volume {} not found in memory, checking filesystem", req.volume_id);
+                Ok(Response::new(DeleteVolumeResponse {}))
+            }
+        }
     }
 
     async fn controller_publish_volume(
@@ -287,6 +424,10 @@ impl Controller for CsiController {
             creation_time,
         });
 
+        if let Err(e) = self.persist_snapshots().await {
+            tracing::error!("Failed to persist snapshots: {}", e);
+        }
+
         Ok(Response::new(CreateSnapshotResponse {
             snapshot: Some(Snapshot {
                 snapshot_id,
@@ -316,7 +457,11 @@ impl Controller for CsiController {
             .output()
             .await;
 
-        { self.snapshots.write().await.remove(&req.snapshot_id); }
+        self.snapshots.write().await.remove(&req.snapshot_id);
+
+        if let Err(e) = self.persist_snapshots().await {
+            tracing::error!("Failed to persist snapshots: {}", e);
+        }
 
         Ok(Response::new(DeleteSnapshotResponse {}))
     }

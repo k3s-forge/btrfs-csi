@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use std::sync::Arc;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use btrfs_csi::csi_server::CsiGrpcServer;
@@ -32,6 +32,48 @@ struct Args {
     /// Log level (trace, debug, info, warn, error)
     #[arg(long, default_value = "info")]
     log_level: String,
+}
+
+/// Scan for stale CSI mounts in a directory and attempt cleanup
+async fn cleanup_stale_mounts(dir: &str) {
+    let mount_dir = std::path::Path::new(dir);
+    if !mount_dir.exists() {
+        return;
+    }
+
+    let entries = match tokio::fs::read_dir(mount_dir).await {
+        Ok(mut entries) => {
+            let mut all = Vec::new();
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                all.push(entry);
+            }
+            all
+        }
+        Err(_) => return,
+    };
+
+    for entry in entries {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let path_str = path.to_string_lossy().to_string();
+        // Check if this is a leftover mount point by trying to list it
+        if let Ok(output) = tokio::process::Command::new("mountpoint")
+            .args(["-q", &path_str])
+            .output()
+            .await
+        {
+            if output.status.success() {
+                warn!("Found stale mount at {}, attempting cleanup", path_str);
+                let _ = tokio::process::Command::new("umount")
+                    .arg(&path_str)
+                    .output()
+                    .await;
+            }
+        }
+    }
 }
 
 #[tokio::main]
@@ -69,6 +111,9 @@ async fn main() -> Result<()> {
         config.replication.data_dir, config.replication.snapshot_dir
     );
 
+    // Crash recovery: clean stale mounts before starting
+    cleanup_stale_mounts(&config.replication.data_dir).await;
+
     // Create gossip service
     let gossip = Arc::new(GossipService::new(config.clone()));
 
@@ -96,12 +141,52 @@ async fn main() -> Result<()> {
         replicator,
     );
 
+    // Load persisted volumes and snapshots from disk
+    server.controller().load_from_disk().await;
+
     info!(
         "CSI driver ready on node {} (zone={})",
         config.node_id, config.zone
     );
 
-    server.serve().await?;
+    // Run gRPC server and wait for shutdown signal concurrently
+    let serve_handle = tokio::spawn({
+        let server = server;
+        async move {
+            if let Err(e) = server.serve().await {
+                tracing::error!("gRPC server error: {}", e);
+            }
+        }
+    });
+
+    // Wait for SIGTERM (Linux) or Ctrl+C (cross-platform)
+    let shutdown_signal = async {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm = signal(SignalKind::terminate())
+                .expect("Failed to register SIGTERM handler");
+            tokio::select! {
+                _ = sigterm.recv() => info!("Received SIGTERM"),
+                _ = tokio::signal::ctrl_c() => info!("Received SIGINT"),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            tokio::signal::ctrl_c().await.ok();
+            info!("Received Ctrl+C");
+        }
+    };
+
+    tokio::select! {
+        _ = serve_handle => {}
+        _ = shutdown_signal => {
+            info!("Shutting down gracefully...");
+            // Give in-flight RPCs time to complete
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            info!("Shutdown complete");
+        }
+    }
 
     Ok(())
 }

@@ -38,6 +38,14 @@ impl CsiGrpcServer {
         }
     }
 
+    pub fn controller(&self) -> &CsiController {
+        &self.controller
+    }
+
+    pub fn node(&self) -> &CsiNode {
+        &self.node
+    }
+
     pub async fn serve(&self) -> Result<()> {
         let endpoint = self.endpoint.clone();
 
