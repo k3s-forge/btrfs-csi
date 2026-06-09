@@ -9,12 +9,16 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::ExchangeConfig;
 
+/// Callback type for node failure events
+pub type NodeFailureCallback = Arc<dyn Fn(String) + Send + Sync>;
+
 /// Gossip service for node discovery and state synchronization
 pub struct GossipService {
     config: ExchangeConfig,
     transport: TcpTransport,
     peers: Arc<RwLock<HashMap<String, NodeInfo>>>,
     local_volumes: Arc<RwLock<Vec<VolumeInfo>>>,
+    on_node_failure: Arc<RwLock<Vec<NodeFailureCallback>>>,
 }
 
 impl GossipService {
@@ -27,7 +31,13 @@ impl GossipService {
             transport,
             peers: Arc::new(RwLock::new(HashMap::new())),
             local_volumes: Arc::new(RwLock::new(Vec::new())),
+            on_node_failure: Arc::new(RwLock::new(Vec::new())),
         }
+    }
+
+    /// Register a callback for node failure events
+    pub async fn on_node_failure(&self, callback: NodeFailureCallback) {
+        self.on_node_failure.write().await.push(callback);
     }
 
     /// Start the gossip service
@@ -50,9 +60,10 @@ impl GossipService {
         // Start peer cleanup
         let config = self.config.clone();
         let peers = self.peers.clone();
+        let on_node_failure = self.on_node_failure.clone();
 
         tokio::spawn(async move {
-            Self::peer_cleanup_loop(config, peers).await;
+            Self::peer_cleanup_loop(config, peers, on_node_failure).await;
         });
 
         Ok(())
@@ -158,6 +169,7 @@ impl GossipService {
     async fn peer_cleanup_loop(
         config: ExchangeConfig,
         peers: Arc<RwLock<HashMap<String, NodeInfo>>>,
+        on_node_failure: Arc<RwLock<Vec<NodeFailureCallback>>>,
     ) {
         let mut interval = tokio::time::interval(config.node_timeout_duration());
 
@@ -165,7 +177,7 @@ impl GossipService {
             interval.tick().await;
 
             let now = chrono::Utc::now().timestamp_millis();
-            let timeout = (config.node_timeout * 1000) as i64; // Convert seconds to milliseconds
+            let timeout = (config.node_timeout * 1000) as i64;
 
             let mut peers = peers.write().await;
             let stale_nodes: Vec<String> = peers
@@ -177,6 +189,12 @@ impl GossipService {
             for node_id in stale_nodes {
                 warn!("Removing stale node: {}", node_id);
                 peers.remove(&node_id);
+
+                // Notify listeners about node failure
+                let callbacks = on_node_failure.read().await;
+                for callback in callbacks.iter() {
+                    callback(node_id.clone());
+                }
             }
         }
     }

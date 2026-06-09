@@ -12,6 +12,10 @@ use tracing::{error, info, warn};
 use crate::config::ExchangeConfig;
 use crate::gossip::GossipService;
 
+const MAX_RETRIES: u32 = 5;
+const BASE_BACKOFF_MS: u64 = 1000;
+const MAX_BACKOFF_MS: u64 = 60000;
+
 /// Replication state for a volume
 #[derive(Debug, Clone)]
 pub struct ReplicationState {
@@ -20,6 +24,9 @@ pub struct ReplicationState {
     pub last_sync: Option<i64>,
     pub status: ReplicationStatus,
     pub target_nodes: Vec<String>,
+    pub retry_count: u32,
+    pub last_error: Option<String>,
+    pub failed_nodes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -28,6 +35,7 @@ pub enum ReplicationStatus {
     Syncing,
     Error(String),
     Completed,
+    Retrying,
 }
 
 /// Replicator for handling volume replication
@@ -84,12 +92,34 @@ impl Replicator {
         loop {
             interval.tick().await;
 
-            // Get volumes that need replication
+            // Get volumes that need replication (idle, completed, or retrying)
             let volumes = replicator.get_volumes_for_replication().await;
 
             for vol in volumes {
-                if let Err(e) = replicator.replicate_volume(&vol).await {
-                    error!("Failed to replicate volume {}: {}", vol, e);
+                // Check backoff for retrying volumes
+                let should_retry = {
+                    let states = replicator.states.read().await;
+                    if let Some(state) = states.get(&vol) {
+                        if state.status == ReplicationStatus::Retrying {
+                            let backoff = std::cmp::min(
+                                BASE_BACKOFF_MS * 2u64.pow(state.retry_count - 1),
+                                MAX_BACKOFF_MS,
+                            );
+                            let now = chrono::Utc::now().timestamp_millis();
+                            let last = state.last_sync.unwrap_or(0);
+                            now - last >= backoff as i64
+                        } else {
+                            true
+                        }
+                    } else {
+                        true
+                    }
+                };
+
+                if should_retry {
+                    if let Err(e) = replicator.replicate_volume(&vol).await {
+                        error!("Failed to replicate volume {}: {}", vol, e);
+                    }
                 }
             }
         }
@@ -99,16 +129,22 @@ impl Replicator {
     async fn get_volumes_for_replication(&self) -> Vec<String> {
         let states = self.states.read().await;
         let now = chrono::Utc::now().timestamp_millis();
-        let interval = (self.config.replication.default_interval * 1000) as i64; // Convert seconds to milliseconds
+        let interval = (self.config.replication.default_interval * 1000) as i64;
 
         states
             .iter()
             .filter(|(_, state)| {
-                state.status != ReplicationStatus::Syncing
-                    && state
-                        .last_sync
-                        .map(|last| now - last > interval)
-                        .unwrap_or(true)
+                match state.status {
+                    ReplicationStatus::Syncing => false,
+                    ReplicationStatus::Retrying => true,
+                    ReplicationStatus::Idle | ReplicationStatus::Completed => {
+                        state.last_sync.map(|last| now - last > interval).unwrap_or(true)
+                    }
+                    ReplicationStatus::Error(_) => {
+                        // Retry after 5x the normal interval
+                        state.last_sync.map(|last| now - last > interval * 5).unwrap_or(true)
+                    }
+                }
             })
             .map(|(vol_id, _)| vol_id.clone())
             .collect()
@@ -129,6 +165,9 @@ impl Replicator {
                     last_sync: None,
                     status: ReplicationStatus::Idle,
                     target_nodes: Vec::new(),
+                    retry_count: 0,
+                    last_error: None,
+                    failed_nodes: Vec::new(),
                 });
             state.status = ReplicationStatus::Syncing;
         }
@@ -140,22 +179,32 @@ impl Replicator {
             .await
             .context("Failed to create snapshot")?;
 
-        // Get target nodes
+        // Get target nodes, excluding previously failed nodes
         let targets = self.select_replication_targets(volume_id).await;
 
-        // Send to each target
-        let mut success = true;
+        if targets.is_empty() {
+            warn!("No replication targets available for volume {}", volume_id);
+            let mut states = self.states.write().await;
+            if let Some(state) = states.get_mut(volume_id) {
+                state.status = ReplicationStatus::Error("No targets available".to_string());
+                state.last_error = Some("No replication targets available".to_string());
+            }
+            return Ok(());
+        }
+
+        // Send to each target with retry
+        let mut success_count = 0u32;
+        let mut new_failed_nodes = Vec::new();
+
         for target in &targets {
-            match self
-                .send_to_target(&snapshot, &previous, target)
-                .await
-            {
+            match self.send_with_retry(&snapshot, &previous, target, volume_id).await {
                 Ok(()) => {
                     info!("Successfully replicated {} to {}", volume_id, target.id);
+                    success_count += 1;
                 }
                 Err(e) => {
-                    error!("Failed to replicate {} to {}: {}", volume_id, target.id, e);
-                    success = false;
+                    error!("Failed to replicate {} to {} after retries: {}", volume_id, target.id, e);
+                    new_failed_nodes.push(target.id.clone());
                 }
             }
         }
@@ -166,15 +215,77 @@ impl Replicator {
             if let Some(state) = states.get_mut(volume_id) {
                 state.last_snapshot = Some(snapshot.name);
                 state.last_sync = Some(chrono::Utc::now().timestamp_millis());
-                state.status = if success {
-                    ReplicationStatus::Completed
+
+                // Track permanently failed nodes
+                for node in &new_failed_nodes {
+                    if !state.failed_nodes.contains(node) {
+                        state.failed_nodes.push(node.clone());
+                    }
+                }
+
+                if success_count == targets.len() as u32 {
+                    state.status = ReplicationStatus::Completed;
+                    state.retry_count = 0;
+                    state.last_error = None;
+                } else if success_count > 0 {
+                    state.status = ReplicationStatus::Completed;
+                    state.last_error = Some(format!(
+                        "Partial success: {}/{} targets",
+                        success_count, targets.len()
+                    ));
                 } else {
-                    ReplicationStatus::Error("Some replications failed".to_string())
-                };
+                    state.retry_count += 1;
+                    state.status = if state.retry_count >= MAX_RETRIES {
+                        ReplicationStatus::Error("Max retries exceeded".to_string())
+                    } else {
+                        ReplicationStatus::Retrying
+                    };
+                    state.last_error = Some(format!(
+                        "All {} targets failed (attempt {}/{})",
+                        targets.len(), state.retry_count, MAX_RETRIES
+                    ));
+                }
             }
         }
 
         Ok(())
+    }
+
+    /// Send with exponential backoff retry
+    async fn send_with_retry(
+        &self,
+        snapshot: &Snapshot,
+        previous: &Option<Snapshot>,
+        target: &btrfs_protocol::message::NodeInfo,
+        volume_id: &str,
+    ) -> Result<()> {
+        let mut last_err = None;
+
+        for attempt in 0..=MAX_RETRIES {
+            match self.send_to_target(snapshot, previous, target).await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    last_err = Some(e.to_string());
+                    if attempt < MAX_RETRIES {
+                        let backoff = std::cmp::min(
+                            BASE_BACKOFF_MS * 2u64.pow(attempt),
+                            MAX_BACKOFF_MS,
+                        );
+                        warn!(
+                            "Replication to {} failed (attempt {}/{}), retrying in {}ms: {}",
+                            target.id, attempt + 1, MAX_RETRIES, backoff, e
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_millis(backoff)).await;
+                    }
+                }
+            }
+        }
+
+        Err(anyhow::anyhow!(
+            "Failed after {} retries: {}",
+            MAX_RETRIES,
+            last_err.unwrap_or_default()
+        ))
     }
 
     /// Select replication targets
@@ -183,10 +294,20 @@ impl Replicator {
         volume_id: &str,
     ) -> Vec<btrfs_protocol::message::NodeInfo> {
         let states = self.states.read().await;
-        let exclude = states
-            .get(volume_id)
+        let state = states.get(volume_id);
+
+        // Exclude previously used targets AND permanently failed nodes
+        let mut exclude: Vec<String> = state
             .map(|s| s.target_nodes.clone())
             .unwrap_or_default();
+
+        if let Some(s) = state {
+            for node in &s.failed_nodes {
+                if !exclude.contains(node) {
+                    exclude.push(node.clone());
+                }
+            }
+        }
 
         let count = self.config.replication.default_replica_count as usize;
 
@@ -224,8 +345,56 @@ impl Replicator {
             return Err(anyhow::anyhow!("Unexpected response: {:?}", ack.msg_type));
         }
 
-        // TODO: Stream btrfs send data
-        // For now, just send completion
+        // Execute btrfs send and stream data
+        let mut cmd = tokio::process::Command::new("btrfs");
+        cmd.args(["send"]);
+
+        if let Some(parent) = previous {
+            cmd.args(["-p", &parent.path]);
+        }
+
+        cmd.arg(&snapshot.path);
+
+        let mut child = cmd
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .context("Failed to spawn btrfs send")?;
+
+        let stdout = child.stdout.take().context("Failed to capture stdout")?;
+        let mut reader = tokio::io::BufReader::new(stdout);
+        let mut buffer = vec![0u8; 64 * 1024]; // 64KB chunks
+
+        use tokio::io::AsyncReadExt;
+        loop {
+            let n = reader.read(&mut buffer).await?;
+            if n == 0 {
+                break;
+            }
+
+            let chunk = &buffer[..n];
+            let send_msg = Message::new(
+                MessageType::SendData,
+                chunk.to_vec(),
+            );
+            conn.send_message(&send_msg).await?;
+        }
+
+        // Wait for btrfs send to complete
+        let status = child.wait().await?;
+        if !status.success() {
+            let stderr = child.stderr
+                .take()
+                .map(|mut s| {
+                    let mut buf = Vec::new();
+                    std::io::Read::read_to_end(&mut s, &mut buf).unwrap_or_default();
+                    String::from_utf8_lossy(&buf).to_string()
+                })
+                .unwrap_or_default();
+            return Err(anyhow::anyhow!("btrfs send failed: {}", stderr));
+        }
+
+        // Send completion
         let complete_msg = Message::new(
             MessageType::SendComplete,
             serde_json::to_vec(&SendCompleteResponse {
@@ -254,9 +423,35 @@ impl Replicator {
                 last_sync: None,
                 status: ReplicationStatus::Idle,
                 target_nodes,
+                retry_count: 0,
+                last_error: None,
+                failed_nodes: Vec::new(),
             },
         );
         Ok(())
+    }
+
+    /// Clear failed node tracking for a volume (e.g., after node comes back)
+    pub async fn clear_failed_nodes(&self, volume_id: &str, node_id: &str) {
+        let mut states = self.states.write().await;
+        if let Some(state) = states.get_mut(volume_id) {
+            state.failed_nodes.retain(|n| n != node_id);
+            // Reset error status if we were stuck
+            if state.status == ReplicationStatus::Error("Max retries exceeded".to_string()) {
+                state.status = ReplicationStatus::Idle;
+                state.retry_count = 0;
+            }
+        }
+    }
+
+    /// Get volumes that were targeting a specific node (for re-replication on node failure)
+    pub async fn get_volumes_for_node(&self, node_id: &str) -> Vec<String> {
+        let states = self.states.read().await;
+        states
+            .iter()
+            .filter(|(_, state)| state.target_nodes.contains(&node_id.to_string()))
+            .map(|(vol_id, _)| vol_id.clone())
+            .collect()
     }
 
     /// Unregister a volume

@@ -200,9 +200,21 @@ impl Controller for CsiController {
             }
         }
 
-        // Determine profile type from volume capabilities
-        let profile_type = "default".to_string();
+        // Determine profile type from volume_context
+        let profile_type = req.volume_context
+            .get("volume_type")
+            .cloned()
+            .unwrap_or_else(|| "default".to_string());
+
         let profile = self.get_profile(&profile_type);
+
+        // Validate database profile: sync_writes must be true for data integrity
+        if profile_type == "database" && !profile.sync_writes {
+            tracing::warn!(
+                "Database volume profile '{}' has sync_writes=false, forcing to true for data integrity",
+                profile_type
+            );
+        }
 
         // Apply NOCOW if profile requests it
         if profile.nocow {
@@ -211,6 +223,22 @@ impl Controller for CsiController {
                 .output()
                 .await;
         }
+
+        // Apply compression if set
+        if profile.compression != "none" {
+            let comp_opt = format!("compression={}", profile.compression);
+            let _ = tokio::process::Command::new("btrfs")
+                .args(["property", "set", "-ts", &subvol_path, &comp_opt])
+                .output()
+                .await;
+        }
+
+        // Apply mount options for future mounts (stored in volume_context)
+        let mut final_context = req.volume_context.clone();
+        if profile.sync_writes {
+            final_context.insert("mount_options".to_string(), profile.mount_options.join(","));
+        }
+        final_context.insert("profile_type".to_string(), profile_type.clone());
 
         let volume_id = format!("vol-{}", uuid::Uuid::new_v4());
         let vol = VolInfo {
