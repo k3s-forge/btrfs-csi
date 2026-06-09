@@ -200,8 +200,8 @@ impl Controller for CsiController {
             }
         }
 
-        // Determine profile type from volume_context
-        let profile_type = req.volume_context
+        // Determine profile type from parameters
+        let profile_type = req.parameters
             .get("volume_type")
             .cloned()
             .unwrap_or_else(|| "default".to_string());
@@ -233,12 +233,12 @@ impl Controller for CsiController {
                 .await;
         }
 
-        // Apply mount options for future mounts (stored in volume_context)
-        let mut final_context = req.volume_context.clone();
+        // Apply mount options for future mounts (stored in parameters)
+        let mut final_params = req.parameters.clone();
         if profile.sync_writes {
-            final_context.insert("mount_options".to_string(), profile.mount_options.join(","));
+            final_params.insert("mount_options".to_string(), profile.mount_options.join(","));
         }
-        final_context.insert("profile_type".to_string(), profile_type.clone());
+        final_params.insert("profile_type".to_string(), profile_type.clone());
 
         let volume_id = format!("vol-{}", uuid::Uuid::new_v4());
         let vol = VolInfo {
