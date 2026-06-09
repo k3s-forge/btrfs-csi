@@ -37,14 +37,14 @@ jobs:
         run: echo 'IyEvYmluL2Jhc2gKc2V0IC1lCk5PREVfTkFNRT0iJHtOT01BRF9NRVRBX05PREVfTkFNRTotdW5rbm93bn0iCkNTSV9FTkRQT0lOVD0iJHtDU0lfRU5EUE9JTlQ6LXVuaXg6Ly8vdmFyL3RtcC9jc2kvY3NpLnNvY2t9IgpEQVRBX0RJUj0iJHtOT01BRF9NRVRBX0RBVEFfRElSOi0vbW50L2J0cmZzL2RhdGF9IgpTTkFQX0RJUj0iJHtOT01BRF9NRVRBX1NOQVBfRElSOi0vbW50L2J0cmZzL3NuYXBzaG90c30iCm1rZGlyIC1wIC92YXIvdG1wL2NzaQpjYXQgPiAvdG1wL2J0cmZzLWNzaS1jb25maWctJHtOT0RFX05BTUV9LnRvbWwgPDwgQ09ORkVPRgpub2RlX2lkID0gIiR7Tk9ERV9OQU1FfSIKem9uZSA9ICJkYzEiCmF1dGhfa2V5ID0gInRlc3Qta2V5LWZvci1ub21hZC1jc2ktdGVzdGluZy0yMDI2IgpzZWVkX25vZGVzID0gW10KZ29zc2lwX2ludGVydmFsID0gMTAKaGVhcnRiZWF0X2ludGVydmFsID0gMzAKbm9kZV90aW1lb3V0ID0gOTAKW3JlcGxpY2F0aW9uXQpkZWZhdWx0X3JlcGxpY2FfY291bnQgPSAxCmRlZmF1bHRfaW50ZXJ2YWwgPSAzMAptYXhfY29uY3VycmVudCA9IDQKZGF0YV9kaXIgPSAiJHtEQVRBX0RJUn0iCnNuYXBzaG90X2RpciA9ICIke1NOQVBfRElSfSIKZW5hYmxlX2luY3JlbWVudGFsID0gdHJ1ZQpbbWFpbnRlbmFuY2VdCmVuYWJsZWQgPSBmYWxzZQpDT05GRU9GCmV4ZWMgL2hvbWUvcnVubmVyL3dvcmsvYnRyZnMtY3NpL2J0cmZzLWNzaS90YXJnZXQvcmVsZWFzZS9idHJmcy1jc2kgXAogIC0tY29uZmlnIC90bXAvYnRyZnMtY3NpLWNvbmZpZy0ke05PREVfTkFNRX0udG9tbCBcCiAgLS1lbmRwb2ludCAiJHtDU0lfRU5EUE9JTlR9IiBcCiAgLS1ub2RlLWlkICIke05PREVfTkFNRX0iIFwKICAtbG9nLWxldmVsIGRlYnVn' | base64 -d | sudo tee /usr/local/bin/btrfs-csi-entrypoint.sh > /dev/null && sudo chmod +x /usr/local/bin/btrfs-csi-entrypoint.sh
       - name: Start Nomad server
         run: |
-          sudo mkdir -p /tmp/nomad/server/data
+          mkdir -p /tmp/nomad/server/data
           printf '%s\n' \
             'data_dir = "/tmp/nomad/server/data"' \
             'bind_addr = "127.0.0.1"' \
             'log_level = "INFO"' \
             'server { enabled = true; bootstrap_expect = 1 }' \
             'ports { http = 14646; rpc = 14647; serf = 14648 }' \
-            > /tmp/nomad/server.hcl
+            | sudo tee /tmp/nomad/server.hcl > /dev/null
           sudo nomad agent -config=/tmp/nomad/server.hcl > /tmp/nomad-server.log 2>&1 &
           for i in $(seq 1 30); do
             if curl -s http://127.0.0.1:14646/v1/status/leader 2>/dev/null | grep -q '"'; then
@@ -54,7 +54,7 @@ jobs:
           done
       - name: Start Nomad client
         run: |
-          sudo mkdir -p /tmp/nomad/client/data
+          mkdir -p /tmp/nomad/client/data
           printf '%s\n' \
             'data_dir = "/tmp/nomad/client/data"' \
             'bind_addr = "127.0.0.1"' \
@@ -72,7 +72,7 @@ jobs:
             'plugin "raw_exec" { config { enabled = true } }' \
             'ports { http = 24646; rpc = 24647; serf = 24648 }' \
             'advertise { http = "127.0.0.1"; rpc = "127.0.0.1"; serf = "127.0.0.1" }' \
-            > /tmp/nomad/client.hcl
+            | sudo tee /tmp/nomad/client.hcl > /dev/null
           NOMAD_ADDR=http://127.0.0.1:14646 sudo nomad agent -config=/tmp/nomad/client.hcl > /tmp/nomad-client.log 2>&1 &
           for i in $(seq 1 15); do
             sleep 3
