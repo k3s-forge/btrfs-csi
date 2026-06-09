@@ -244,7 +244,7 @@ message ControllerUnpublishVolumeResponse {}
 
 message ValidateVolumeCapabilitiesRequest {
   repeated string volume_id = 1;
-  Volume volume_capabilities = 2;
+  VolumeCapability volume_capabilities = 2;
   map<string, string> parameters = 3;
   map<string, string> secrets = 4;
 }
