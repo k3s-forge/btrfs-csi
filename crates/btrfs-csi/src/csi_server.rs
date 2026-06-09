@@ -1,9 +1,11 @@
 use anyhow::Result;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
 
+use btrfs_exchange::config::VolumeProfile;
 use btrfs_exchange::gossip::GossipService;
 use btrfs_exchange::replicator::Replicator;
 
@@ -29,11 +31,12 @@ impl CsiGrpcServer {
         data_dir: String,
         gossip: Arc<GossipService>,
         replicator: Arc<Replicator>,
+        volume_profiles: HashMap<String, VolumeProfile>,
     ) -> Self {
         Self {
             endpoint,
             identity: CsiIdentity::new(node_id.clone()),
-            controller: CsiController::new(node_id.clone(), zone.clone(), data_dir.clone(), gossip, replicator),
+            controller: CsiController::new(node_id.clone(), zone.clone(), data_dir.clone(), gossip, replicator, volume_profiles),
             node: CsiNode::new(node_id, zone, data_dir),
         }
     }

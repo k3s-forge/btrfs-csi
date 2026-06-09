@@ -5,6 +5,7 @@ pub mod scheduler;
 pub mod volume_manager;
 
 pub use config::ExchangeConfig;
+pub use config::VolumeProfile;
 pub use gossip::GossipService;
 pub use replicator::Replicator;
 pub use scheduler::ReplicaScheduler;

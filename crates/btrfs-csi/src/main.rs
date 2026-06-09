@@ -139,6 +139,7 @@ async fn main() -> Result<()> {
         config.replication.data_dir.clone(),
         gossip,
         replicator,
+        config.replication.volume_profiles.clone(),
     );
 
     // Load persisted volumes and snapshots from disk
