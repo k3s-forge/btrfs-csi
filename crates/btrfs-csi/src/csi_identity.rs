@@ -1,11 +1,13 @@
 use tonic::{Request, Response, Status};
 
 use crate::csi::identity_server::Identity;
+use crate::csi::get_plugin_capabilities_response as gpcr;
 use crate::csi::{
     GetPluginCapabilitiesRequest, GetPluginCapabilitiesResponse, GetPluginInfoRequest,
     GetPluginInfoResponse, ProbeRequest, ProbeResponse,
 };
 
+#[derive(Clone)]
 pub struct CsiIdentity {
     node_id: String,
 }
@@ -24,15 +26,14 @@ impl Identity for CsiIdentity {
     ) -> Result<Response<GetPluginInfoResponse>, Status> {
         tracing::info!("CSI GetPluginInfo called");
 
+        let mut manifest = std::collections::HashMap::new();
+        manifest.insert("node_id".to_string(), self.node_id.clone());
+        manifest.insert("driver".to_string(), "btrfs".to_string());
+
         let response = GetPluginInfoResponse {
             name: "btrfs-csi".to_string(),
             vendor_version: env!("CARGO_PKG_VERSION").to_string(),
-            manifest: [
-                ("node_id".to_string(), self.node_id.clone()),
-                ("driver".to_string(), "btrfs".to_string()),
-            ]
-            .into_iter()
-            .collect(),
+            manifest,
         };
 
         Ok(Response::new(response))
@@ -44,18 +45,16 @@ impl Identity for CsiIdentity {
     ) -> Result<Response<GetPluginCapabilitiesResponse>, Status> {
         tracing::info!("CSI GetPluginCapabilities called");
 
-        use crate::csi::get_plugin_capabilities_response::capability;
-
         let response = GetPluginCapabilitiesResponse {
             capabilities: vec![
-                capability::Capability {
-                    r#type: Some(capability::Type::Service(capability::Service {
-                        r#type: capability::service::Type::ControllerService as i32,
+                gpcr::Capability {
+                    r#type: Some(gpcr::capability::Type::Service(gpcr::Service {
+                        r#type: gpcr::service::Type::ControllerService.into(),
                     })),
                 },
-                capability::Capability {
-                    r#type: Some(capability::Type::Service(capability::Service {
-                        r#type: capability::service::Type::VolumeAccessibilityConstraints as i32,
+                gpcr::Capability {
+                    r#type: Some(gpcr::capability::Type::Service(gpcr::Service {
+                        r#type: gpcr::service::Type::VolumeAccessibilityConstraints.into(),
                     })),
                 },
             ],
