@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::time::Duration;
 use toml;
 
@@ -63,6 +64,80 @@ impl ExchangeConfig {
     }
 }
 
+/// Volume profile for different workload types
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VolumeProfile {
+    /// Profile name
+    pub name: String,
+
+    /// Enable NOCOW (for databases, usually false to keep COW for snapshots)
+    pub nocow: bool,
+
+    /// Compression algorithm (none, zstd, lzo, zlib)
+    pub compression: String,
+
+    /// Compression level (1-15 for zstd)
+    pub compression_level: u8,
+
+    /// Enable sync writes for data integrity
+    pub sync_writes: bool,
+
+    /// Enable quota enforcement
+    pub quota_enforced: bool,
+
+    /// Subvolume creation flags
+    #[serde(default)]
+    pub create_flags: Vec<String>,
+
+    /// Mount options for this volume type
+    #[serde(default)]
+    pub mount_options: Vec<String>,
+}
+
+impl Default for VolumeProfile {
+    fn default() -> Self {
+        Self {
+            name: "default".to_string(),
+            nocow: false,
+            compression: "zstd".to_string(),
+            compression_level: 1,
+            sync_writes: false,
+            quota_enforced: true,
+            create_flags: vec![],
+            mount_options: vec!["noatime".to_string()],
+        }
+    }
+}
+
+/// Database-specific volume profile (COW enabled, sync writes)
+impl VolumeProfile {
+    pub fn database() -> Self {
+        Self {
+            name: "database".to_string(),
+            nocow: false,  // Keep COW for snapshots/consistency
+            compression: "zstd".to_string(),
+            compression_level: 1,
+            sync_writes: true,
+            quota_enforced: true,
+            create_flags: vec![],
+            mount_options: vec!["noatime,sync".to_string()],
+        }
+    }
+
+    pub fn log() -> Self {
+        Self {
+            name: "log".to_string(),
+            nocow: true,   // NOCOW for append-heavy workloads
+            compression: "lzo".to_string(),
+            compression_level: 1,
+            sync_writes: false,
+            quota_enforced: true,
+            create_flags: vec![],
+            mount_options: vec!["noatime".to_string()],
+        }
+    }
+}
+
 /// Replication configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplicationConfig {
@@ -87,6 +162,10 @@ pub struct ReplicationConfig {
 
     /// Database optimization settings
     pub database: DatabaseConfig,
+
+    /// Volume profiles by type
+    #[serde(default)]
+    pub volume_profiles: HashMap<String, VolumeProfile>,
 }
 
 fn default_replication_interval() -> u64 { 30 }
@@ -179,6 +258,11 @@ impl Default for ExchangeConfig {
 
 impl Default for ReplicationConfig {
     fn default() -> Self {
+        let mut volume_profiles = HashMap::new();
+        volume_profiles.insert("default".to_string(), VolumeProfile::default());
+        volume_profiles.insert("database".to_string(), VolumeProfile::database());
+        volume_profiles.insert("log".to_string(), VolumeProfile::log());
+
         Self {
             default_replica_count: 2,
             default_interval: 30,
@@ -187,6 +271,7 @@ impl Default for ReplicationConfig {
             snapshot_dir: "/mnt/snapshots".to_string(),
             enable_incremental: true,
             database: DatabaseConfig::default(),
+            volume_profiles,
         }
     }
 }
