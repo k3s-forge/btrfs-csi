@@ -18,26 +18,17 @@ jobs:
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
 
-    - name: Install btrfs-progs
-      run: sudo apt-get update && sudo apt-get install -y btrfs-progs
+    - name: Install btrfs-progs and protoc
+      run: sudo apt-get update && sudo apt-get install -y btrfs-progs protobuf-compiler
 
     - name: Create btrfs test filesystem
       run: |
-        # Create 10GB sparse file for btrfs
         truncate -s 10G /tmp/btrfs-test.img
-        
-        # Format as btrfs
         sudo mkfs.btrfs -f /tmp/btrfs-test.img
-        
-        # Create mount points
         sudo mkdir -p /mnt/btrfs-data
         sudo mkdir -p /mnt/btrfs-snapshots
-        
-        # Mount btrfs
         sudo mount -o loop /tmp/btrfs-test.img /mnt/btrfs-data
         sudo mount -o loop /tmp/btrfs-test.img /mnt/btrfs-snapshots
-        
-        # Verify btrfs is working
         sudo btrfs filesystem show /mnt/btrfs-data
         df -h /mnt/btrfs-data
 
@@ -61,37 +52,28 @@ jobs:
         echo "=== Writing 1GB test data ==="
         sudo dd if=/dev/urandom of=/mnt/btrfs-data/test-1gb.bin bs=1M count=1024
         sudo sync
-        
         echo "=== Creating snapshot ==="
         sudo btrfs subvolume snapshot -r /mnt/btrfs-data /mnt/btrfs-snapshots/snap-1
         ls -la /mnt/btrfs-snapshots/
-        
         echo "=== Writing more data ==="
         sudo dd if=/dev/urandom of=/mnt/btrfs-data/test-2gb.bin bs=1M count=1024
         sudo sync
-        
         echo "=== Creating incremental snapshot ==="
         sudo btrfs subvolume snapshot -r /mnt/btrfs-data /mnt/btrfs-snapshots/snap-2
         ls -la /mnt/btrfs-snapshots/
-        
         echo "=== Testing btrfs send (incremental) ==="
         sudo btrfs send -p /mnt/btrfs-snapshots/snap-1 /mnt/btrfs-snapshots/snap-2 | wc -c
         echo "bytes sent incrementally"
-        
         echo "=== Test complete ==="
         sudo btrfs filesystem usage /mnt/btrfs-data
 
     - name: Test replication protocol
       run: |
         echo "=== Testing HMAC authentication ==="
-        # Generate test key
         KEY=$(openssl rand -hex 32)
         echo "Generated key: ${KEY:0:8}..."
-        
         echo "=== Testing message serialization ==="
-        # Start the binary in background and test
         cargo run --bin btrfs-csi -- --help
-        
         echo "=== Protocol test complete ==="
 
     - name: Unmount btrfs
