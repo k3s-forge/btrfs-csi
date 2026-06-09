@@ -16,7 +16,7 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y btrfs-progs iproute2 jq
+        sudo apt-get install -y btrfs-progs iproute2 jq protobuf-compiler
 
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
@@ -35,7 +35,6 @@ jobs:
 
     - name: Create btrfs test filesystems
       run: |
-        # Create 3 btrfs filesystems (simulating 3 nodes)
         for i in 1 2 3; do
           sudo truncate -s 5G /tmp/btrfs-node${i}.img
           sudo mkfs.btrfs -f /tmp/btrfs-node${i}.img
@@ -43,8 +42,6 @@ jobs:
           sudo mount -o loop /tmp/btrfs-node${i}.img /mnt/node${i}/data
           sudo ln -sf /mnt/node${i}/data /mnt/node${i}/snapshots
         done
-        
-        # Verify
         for i in 1 2 3; do
           echo "Node $i:"
           sudo btrfs filesystem show /mnt/node${i}/data
@@ -53,46 +50,26 @@ jobs:
     - name: Test btrfs operations
       run: |
         echo "=== Testing btrfs subvolume operations ==="
-        
         for i in 1 2 3; do
           echo "--- Node $i ---"
-          
-          # Create subvolume
           sudo btrfs subvolume create /mnt/node${i}/data/vol-test
-          
-          # Write 100MB test data
           sudo dd if=/dev/urandom of=/mnt/node${i}/data/vol-test/test.bin bs=1M count=100
           sudo sync
-          
-          # Create snapshot
           sudo btrfs subvolume snapshot -r /mnt/node${i}/data/vol-test /mnt/node${i}/data/snap-1
-          
-          # Write more data
           sudo dd if=/dev/urandom of=/mnt/node${i}/data/vol-test/more.bin bs=1M count=50
           sudo sync
-          
-          # Create another snapshot
           sudo btrfs subvolume snapshot -r /mnt/node${i}/data/vol-test /mnt/node${i}/data/snap-2
-          
-          # Test incremental send
           echo "Testing incremental send on node $i..."
           sudo btrfs send -p /mnt/node${i}/data/snap-1 /mnt/node${i}/data/snap-2 | wc -c
           echo "bytes sent"
-          
-          # Show usage
           sudo btrfs filesystem usage /mnt/node${i}/data
         done
-        
         echo "=== All btrfs tests passed! ==="
 
     - name: Test CSI binary
       run: |
         echo "=== Testing CSI binary ==="
-        
-        # Test help
         ./target/release/btrfs-csi --help
-        
-        # Test with config
         cat > /tmp/test-config.toml <<'EOF'
         [node]
         node_id = "test-node"
@@ -113,58 +90,39 @@ jobs:
         enabled = true
         balance_threshold = 0.7
         EOF
-        
         mkdir -p /tmp/test-data /tmp/test-snapshots
-        
-        # Start CSI in background (will fail but shows it works)
         timeout 3 ./target/release/btrfs-csi --config /tmp/test-config.toml --endpoint 0.0.0.0:9201 || true
-        
         echo "=== CSI binary test complete ==="
 
     - name: Test replication protocol
       run: |
         echo "=== Testing replication protocol ==="
-        
-        # Start CSI server in background
         ./target/release/btrfs-csi --config /tmp/test-config.toml --endpoint 0.0.0.0:9201 &
         CSI_PID=$!
-        
         sleep 2
-        
-        # Check if it's running
         if kill -0 $CSI_PID 2>/dev/null; then
           echo "CSI server started successfully"
-          
-          # Test connection
           timeout 2 nc -zv localhost 9201 && echo "Port 9201 is open" || echo "Port 9201 closed"
-          
           kill $CSI_PID || true
         else
           echo "CSI server exited (expected in test env)"
         fi
-        
         echo "=== Protocol test complete ==="
 
     - name: Test large data replication
       run: |
         echo "=== Testing large data replication ==="
-        
-        # Simulate replication between nodes
         echo "Node 1: Creating 500MB volume..."
         sudo btrfs subvolume create /mnt/node1/data/large-vol
         sudo dd if=/dev/urandom of=/mnt/node1/data/large-vol/data.bin bs=1M count=500
         sudo sync
-        
         echo "Node 1: Creating snapshot..."
         sudo btrfs subvolume snapshot -r /mnt/node1/data/large-vol /mnt/node1/data/large-snap
-        
         echo "Node 1 -> Node 2: Simulating send..."
         sudo btrfs send /mnt/node1/data/large-snap | sudo btrfs receive /mnt/node2/data/
-        
         echo "Verifying data on Node 2..."
         ls -la /mnt/node2/data/large-snap/
         sudo md5sum /mnt/node1/data/large-vol/data.bin /mnt/node2/data/large-snap/data.bin
-        
         echo "=== Large data test complete ==="
 
     - name: Cleanup
