@@ -1,0 +1,334 @@
+name: Replication End-to-End Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  replication-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y btrfs-progs protobuf-compiler
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build
+        run: cargo build --release 2>&1
+
+      - name: Setup btrfs filesystems
+        run: |
+          # Sender filesystem
+          sudo truncate -s 5G /tmp/repl-sender.img
+          sudo mkfs.btrfs -f -d single -m dup /tmp/repl-sender.img
+          sudo mkdir -p /mnt/btrfs/sender-data /mnt/btrfs/sender-snapshots
+          sudo mount -o loop /tmp/repl-sender.img /mnt/btrfs/sender-data
+
+          # Receiver filesystem
+          sudo truncate -s 5G /tmp/repl-receiver.img
+          sudo mkfs.btrfs -f -d single -m dup /tmp/repl-receiver.img
+          sudo mkdir -p /mnt/btrfs/receiver-data /mnt/btrfs/receiver-snapshots
+          sudo mount -o loop /tmp/repl-receiver.img /mnt/btrfs/receiver-data
+
+          df -h /mnt/btrfs/sender-data /mnt/btrfs/receiver-data
+          echo "=== Btrfs filesystems ready ==="
+
+      - name: Write receiver config
+        run: |
+          cat > /tmp/receiver-config.toml << 'RECEIVER_EOF'
+          node_id = "receiver-node"
+          listen_addr = "127.0.0.1"
+          listen_port = 9201
+          zone = "test"
+          auth_key = "test-key-for-e2e-replication-2026"
+          seed_nodes = []
+          gossip_interval = 10
+          heartbeat_interval = 30
+          node_timeout = 90
+
+          [replication]
+          default_replica_count = 1
+          default_interval = 30
+          max_concurrent = 4
+          data_dir = "/mnt/btrfs/receiver-data"
+          snapshot_dir = "/mnt/btrfs/receiver-snapshots"
+          enable_incremental = true
+
+          [replication.database]
+          enabled = true
+          sqlite_wal_mode = true
+          checkpoint_interval = 30
+          enable_nocow = false
+
+          [maintenance]
+          enabled = false
+          balance_schedule = "0 2 * * *"
+          balance_threshold = 0.7
+          scrub_schedule = "0 3 * * 0"
+          snapshot_cleanup_schedule = "0 4 * * *"
+
+          [maintenance.snapshot_retention]
+          daily = 7
+          weekly = 4
+          monthly = 3
+          RECEIVER_EOF
+          echo "Receiver config written"
+
+      - name: Write sender config
+        run: |
+          cat > /tmp/sender-config.toml << 'SENDER_EOF'
+          node_id = "sender-node"
+          listen_addr = "127.0.0.1"
+          listen_port = 9200
+          zone = "test"
+          auth_key = "test-key-for-e2e-replication-2026"
+          seed_nodes = ["127.0.0.1:9201"]
+          gossip_interval = 10
+          heartbeat_interval = 30
+          node_timeout = 90
+
+          [replication]
+          default_replica_count = 1
+          default_interval = 30
+          max_concurrent = 4
+          data_dir = "/mnt/btrfs/sender-data"
+          snapshot_dir = "/mnt/btrfs/sender-snapshots"
+          enable_incremental = true
+
+          [replication.database]
+          enabled = true
+          sqlite_wal_mode = true
+          checkpoint_interval = 30
+          enable_nocow = false
+
+          [maintenance]
+          enabled = false
+          balance_schedule = "0 2 * * *"
+          balance_threshold = 0.7
+          scrub_schedule = "0 3 * * 0"
+          snapshot_cleanup_schedule = "0 4 * * *"
+
+          [maintenance.snapshot_retention]
+          daily = 7
+          weekly = 4
+          monthly = 3
+          SENDER_EOF
+          echo "Sender config written"
+
+      - name: Start receiver CSI driver
+        run: |
+          mkdir -p /tmp/csi-receiver
+          target/release/btrfs-csi \
+            --config /tmp/receiver-config.toml \
+            --endpoint unix:///tmp/csi-receiver/csi.sock \
+            --log-level debug \
+            > /tmp/receiver.log 2>&1 &
+          RECEIVER_PID=$!
+          echo "Receiver PID: $RECEIVER_PID"
+
+          # Wait for receiver to start
+          for i in $(seq 1 20); do
+            sleep 1
+            if [ -S /tmp/csi-receiver/csi.sock ]; then
+              echo "Receiver socket ready"
+              break
+            fi
+            echo "  Waiting for receiver socket... ($i)"
+          done
+
+          # Check receiver is running
+          if kill -0 $RECEIVER_PID 2>/dev/null; then
+            echo "Receiver running"
+          else
+            echo "=== Receiver failed to start! ==="
+            cat /tmp/receiver.log
+            exit 1
+          fi
+
+      - name: Start sender CSI driver
+        run: |
+          mkdir -p /tmp/csi-sender
+          target/release/btrfs-csi \
+            --config /tmp/sender-config.toml \
+            --endpoint unix:///tmp/csi-sender/csi.sock \
+            --log-level debug \
+            > /tmp/sender.log 2>&1 &
+          SENDER_PID=$!
+          echo "Sender PID: $SENDER_PID"
+
+          # Wait for sender to start
+          for i in $(seq 1 20); do
+            sleep 1
+            if [ -S /tmp/csi-sender/csi.sock ]; then
+              echo "Sender socket ready"
+              break
+            fi
+            echo "  Waiting for sender socket... ($i)"
+          done
+
+          # Wait for gossip to discover receiver
+          sleep 5
+
+          # Check sender is running
+          if kill -0 $SENDER_PID 2>/dev/null; then
+            echo "Sender running"
+          else
+            echo "=== Sender failed to start! ==="
+            cat /tmp/sender.log
+            exit 1
+          fi
+
+      - name: Test 1: Create volume and write data on sender
+        run: |
+          echo "=== Creating test subvolume on sender ==="
+          sudo btrfs subvolume create /mnt/btrfs/sender-data/test-vol
+
+          echo "=== Writing test data ==="
+          # Write known pattern
+          dd if=/dev/urandom of=/mnt/btrfs/sender-data/test-vol/data.bin bs=1M count=10 2>&1
+          echo "REPLICATION_TEST_DATA_$(date +%s)" | sudo tee /mnt/btrfs/sender-data/test-vol/test.txt
+          sync
+
+          echo "=== Verifying data on sender ==="
+          cat /mnt/btrfs/sender-data/test-vol/test.txt
+          ls -la /mnt/btrfs/sender-data/test-vol/
+
+          echo "=== Computing sender checksum ==="
+          SENDER_SHA=$(sha256sum /mnt/btrfs/sender-data/test-vol/data.bin | awk '{print $1}')
+          echo "Sender checksum: $SENDER_SHA"
+          echo "$SENDER_SHA" > /tmp/sender-checksum.txt
+
+      - name: Test 2: Create snapshot and replicate
+        run: |
+          echo "=== Creating readonly snapshot ==="
+          sudo btrfs subvolume snapshot -r /mnt/btrfs/sender-data/test-vol /mnt/btrfs/sender-snapshots/test-vol-snap
+
+          echo "=== Sending snapshot to receiver ==="
+          sudo btrfs send /mnt/btrfs/sender-snapshots/test-vol-snap | \
+            sudo btrfs receive /mnt/btrfs/receiver-data/
+
+          echo "=== Verifying received data ==="
+          ls -la /mnt/btrfs/receiver-data/test-vol-snap/
+
+          echo "=== Computing receiver checksum ==="
+          RECEIVER_SHA=$(sha256sum /mnt/btrfs/receiver-data/test-vol-snap/data.bin | awk '{print $1}')
+          echo "Receiver checksum: $RECEIVER_SHA"
+          echo "$RECEIVER_SHA" > /tmp/receiver-checksum.txt
+
+      - name: Test 3: Verify data integrity
+        run: |
+          echo "=== Comparing checksums ==="
+          SENDER_SHA=$(cat /tmp/sender-checksum.txt)
+          RECEIVER_SHA=$(cat /tmp/receiver-checksum.txt)
+
+          echo "Sender:   $SENDER_SHA"
+          echo "Receiver: $RECEIVER_SHA"
+
+          if [ "$SENDER_SHA" = "$RECEIVER_SHA" ]; then
+            echo "=== CHECKSUM MATCH! Data integrity verified ==="
+          else
+            echo "=== CHECKSUM MISMATCH! Data corruption detected ==="
+            exit 1
+          fi
+
+          echo "=== Verifying test.txt content ==="
+          RECEIVED_CONTENT=$(cat /mnt/btrfs/receiver-data/test-vol-snap/test.txt)
+          echo "Received: $RECEIVED_CONTENT"
+          if echo "$RECEIVED_CONTENT" | grep -q "REPLICATION_TEST_DATA_"; then
+            echo "=== Text content verified ==="
+          else
+            echo "=== Text content mismatch ==="
+            exit 1
+          fi
+
+          echo "=== Verifying file sizes ==="
+          SENDER_SIZE=$(stat -c%s /mnt/btrfs/sender-data/test-vol/data.bin)
+          RECEIVER_SIZE=$(stat -c%s /mnt/btrfs/receiver-data/test-vol-snap/data.bin)
+          echo "Sender size:   $SENDER_SIZE"
+          echo "Receiver size: $RECEIVER_SIZE"
+          if [ "$SENDER_SIZE" = "$RECEIVER_SIZE" ]; then
+            echo "=== File sizes match ==="
+          else
+            echo "=== File sizes differ ==="
+            exit 1
+          fi
+
+      - name: Test 4: Incremental replication
+        run: |
+          echo "=== Writing more data to sender ==="
+          dd if=/dev/urandom of=/mnt/btrfs/sender-data/test-vol/incremental.bin bs=1M count=5 2>&1
+          sync
+
+          echo "=== Creating new snapshot ==="
+          sudo btrfs subvolume snapshot -r /mnt/btrfs/sender-data/test-vol /mnt/btrfs/sender-snapshots/test-vol-snap2
+
+          echo "=== Incremental send ==="
+          sudo btrfs send -p /mnt/btrfs/sender-snapshots/test-vol-snap /mnt/btrfs/sender-snapshots/test-vol-snap2 | \
+            sudo btrfs receive /mnt/btrfs/receiver-data/
+
+          echo "=== Verifying incremental data ==="
+          ls -la /mnt/btrfs/receiver-data/test-vol-snap2/
+          if [ -f /mnt/btrfs/receiver-data/test-vol-snap2/incremental.bin ]; then
+            echo "=== Incremental file present ==="
+            INCR_SHA=$(sha256sum /mnt/btrfs/receiver-data/test-vol-snap2/incremental.bin | awk '{print $1}')
+            ORIG_SHA=$(sha256sum /mnt/btrfs/sender-data/test-vol/incremental.bin | awk '{print $1}')
+            if [ "$INCR_SHA" = "$ORIG_SHA" ]; then
+              echo "=== Incremental data integrity verified ==="
+            else
+              echo "=== Incremental checksum mismatch ==="
+              exit 1
+            fi
+          else
+            echo "=== Incremental file missing ==="
+            exit 1
+          fi
+
+      - name: Print logs
+        if: always()
+        run: |
+          echo "=== Sender logs (last 50 lines) ==="
+          tail -50 /tmp/sender.log 2>/dev/null || echo "No sender log"
+          echo ""
+          echo "=== Receiver logs (last 50 lines) ==="
+          tail -50 /tmp/receiver.log 2>/dev/null || echo "No receiver log"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          # Kill CSI drivers
+          sudo pkill -f "btrfs-csi" 2>/dev/null || true
+          sleep 2
+
+          # Cleanup btrfs
+          sudo btrfs subvolume delete /mnt/btrfs/receiver-data/test-vol-snap2 2>/dev/null || true
+          sudo btrfs subvolume delete /mnt/btrfs/receiver-data/test-vol-snap 2>/dev/null || true
+          sudo btrfs subvolume delete /mnt/btrfs/sender-snapshots/test-vol-snap2 2>/dev/null || true
+          sudo btrfs subvolume delete /mnt/btrfs/sender-snapshots/test-vol-snap 2>/dev/null || true
+          sudo btrfs subvolume delete /mnt/btrfs/sender-data/test-vol 2>/dev/null || true
+
+          sudo umount /mnt/btrfs/sender-data /mnt/btrfs/receiver-data 2>/dev/null || true
+          sudo rm -f /tmp/repl-sender.img /tmp/repl-receiver.img
+          sudo rm -rf /tmp/csi-sender /tmp/csi-receiver
+          sudo rm -f /tmp/sender-config.toml /tmp/receiver-config.toml
+          sudo rm -f /tmp/sender.log /tmp/receiver.log
+          sudo rm -f /tmp/sender-checksum.txt /tmp/receiver-checksum.txt
+          echo "Cleanup complete"
