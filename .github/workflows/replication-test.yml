@@ -197,17 +197,17 @@ jobs:
           sudo btrfs subvolume create /mnt/btrfs/sender-data/test-vol
 
           echo "=== Writing test data ==="
-          # Write known pattern
-          dd if=/dev/urandom of=/mnt/btrfs/sender-data/test-vol/data.bin bs=1M count=10 2>&1
-          echo "REPLICATION_TEST_DATA_$(date +%s)" | sudo tee /mnt/btrfs/sender-data/test-vol/test.txt
+          # Write known pattern (subvolume is root-owned, use sudo)
+          sudo dd if=/dev/urandom of=/mnt/btrfs/sender-data/test-vol/data.bin bs=1M count=10 2>&1
+          echo "REPLICATION_TEST_DATA_$(date +%s)" | sudo tee /mnt/btrfs/sender-data/test-vol/test.txt > /dev/null
           sync
 
           echo "=== Verifying data on sender ==="
-          cat /mnt/btrfs/sender-data/test-vol/test.txt
+          sudo cat /mnt/btrfs/sender-data/test-vol/test.txt
           ls -la /mnt/btrfs/sender-data/test-vol/
 
           echo "=== Computing sender checksum ==="
-          SENDER_SHA=$(sha256sum /mnt/btrfs/sender-data/test-vol/data.bin | awk '{print $1}')
+          SENDER_SHA=$(sudo sha256sum /mnt/btrfs/sender-data/test-vol/data.bin | awk '{print $1}')
           echo "Sender checksum: $SENDER_SHA"
           echo "$SENDER_SHA" > /tmp/sender-checksum.txt
 
@@ -224,7 +224,7 @@ jobs:
           ls -la /mnt/btrfs/receiver-data/test-vol-snap/
 
           echo "=== Computing receiver checksum ==="
-          RECEIVER_SHA=$(sha256sum /mnt/btrfs/receiver-data/test-vol-snap/data.bin | awk '{print $1}')
+          RECEIVER_SHA=$(sudo sha256sum /mnt/btrfs/receiver-data/test-vol-snap/data.bin | awk '{print $1}')
           echo "Receiver checksum: $RECEIVER_SHA"
           echo "$RECEIVER_SHA" > /tmp/receiver-checksum.txt
 
@@ -245,7 +245,7 @@ jobs:
           fi
 
           echo "=== Verifying test.txt content ==="
-          RECEIVED_CONTENT=$(cat /mnt/btrfs/receiver-data/test-vol-snap/test.txt)
+          RECEIVED_CONTENT=$(sudo cat /mnt/btrfs/receiver-data/test-vol-snap/test.txt)
           echo "Received: $RECEIVED_CONTENT"
           if echo "$RECEIVED_CONTENT" | grep -q "REPLICATION_TEST_DATA_"; then
             echo "=== Text content verified ==="
@@ -269,7 +269,7 @@ jobs:
       - name: "Test 4 - Incremental replication"
         run: |
           echo "=== Writing more data to sender ==="
-          dd if=/dev/urandom of=/mnt/btrfs/sender-data/test-vol/incremental.bin bs=1M count=5 2>&1
+          sudo dd if=/dev/urandom of=/mnt/btrfs/sender-data/test-vol/incremental.bin bs=1M count=5 2>&1
           sync
 
           echo "=== Creating new snapshot ==="
@@ -283,8 +283,8 @@ jobs:
           ls -la /mnt/btrfs/receiver-data/test-vol-snap2/
           if [ -f /mnt/btrfs/receiver-data/test-vol-snap2/incremental.bin ]; then
             echo "=== Incremental file present ==="
-            INCR_SHA=$(sha256sum /mnt/btrfs/receiver-data/test-vol-snap2/incremental.bin | awk '{print $1}')
-            ORIG_SHA=$(sha256sum /mnt/btrfs/sender-data/test-vol/incremental.bin | awk '{print $1}')
+            INCR_SHA=$(sudo sha256sum /mnt/btrfs/receiver-data/test-vol-snap2/incremental.bin | awk '{print $1}')
+            ORIG_SHA=$(sudo sha256sum /mnt/btrfs/sender-data/test-vol/incremental.bin | awk '{print $1}')
             if [ "$INCR_SHA" = "$ORIG_SHA" ]; then
               echo "=== Incremental data integrity verified ==="
             else
