@@ -12,8 +12,12 @@ pub struct ExchangeConfig {
     /// Node address for incoming connections
     pub listen_addr: String,
 
-    /// Port for transport
+    /// Port for transport (gossip)
     pub listen_port: u16,
+
+    /// Port for incoming replication connections (separate from gossip)
+    #[serde(default = "default_replication_port")]
+    pub replication_port: u16,
 
     /// Zone/region for topology
     pub zone: String,
@@ -46,6 +50,7 @@ pub struct ExchangeConfig {
 fn default_gossip_interval() -> u64 { 10 }
 fn default_heartbeat_interval() -> u64 { 30 }
 fn default_node_timeout() -> u64 { 90 }
+fn default_replication_port() -> u16 { 9300 }
 
 impl ExchangeConfig {
     /// Get gossip interval as Duration
@@ -244,6 +249,7 @@ impl Default for ExchangeConfig {
             node_id: uuid::Uuid::new_v4().to_string(),
             listen_addr: "0.0.0.0".to_string(),
             listen_port: 9200,
+            replication_port: 9300,
             zone: "default".to_string(),
             auth_key: String::new(),
             seed_nodes: Vec::new(),

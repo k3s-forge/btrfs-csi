@@ -58,6 +58,7 @@ jobs:
             'node_id = "receiver-node"' \
             'listen_addr = "127.0.0.1"' \
             'listen_port = 9201' \
+            'replication_port = 9301' \
             'zone = "test"' \
             'auth_key = "test-key-for-e2e-replication-2026"' \
             'seed_nodes = []' \
@@ -95,6 +96,7 @@ jobs:
             'node_id = "sender-node"' \
             'listen_addr = "127.0.0.1"' \
             'listen_port = 9200' \
+            'replication_port = 9300' \
             'zone = "test"' \
             'auth_key = "test-key-for-e2e-replication-2026"' \
             'seed_nodes = ["127.0.0.1:9201"]' \

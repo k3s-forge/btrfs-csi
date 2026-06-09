@@ -24,7 +24,7 @@ impl ReplicationReceiver {
     pub async fn start(&self) -> Result<()> {
         let addr: SocketAddr = format!(
             "{}:{}",
-            self.config.listen_addr, self.config.listen_port
+            self.config.listen_addr, self.config.replication_port
         )
         .parse()
         .context("Invalid listen address")?;
