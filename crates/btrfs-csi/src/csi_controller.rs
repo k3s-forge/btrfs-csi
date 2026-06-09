@@ -9,6 +9,7 @@ use btrfs_exchange::replicator::Replicator;
 use crate::csi::controller_server::Controller;
 use crate::csi::*;
 
+#[derive(Clone)]
 pub struct CsiController {
     node_id: String,
     zone: String,
@@ -181,18 +182,21 @@ impl Controller for CsiController {
     ) -> Result<Response<ValidateVolumeCapabilitiesResponse>, Status> {
         let req = request.into_inner();
 
+        let vol_id = req.volume_id.first()
+            .ok_or_else(|| Status::invalid_argument("volume_id is required"))?;
+
         {
             let volumes = self.volumes.read().await;
-            if volumes.get(&req.volume_id).is_none() {
-                return Err(Status::not_found(format!("Volume {} not found", req.volume_id)));
+            if volumes.get(vol_id).is_none() {
+                return Err(Status::not_found(format!("Volume {} not found", vol_id)));
             }
         }
 
         Ok(Response::new(ValidateVolumeCapabilitiesResponse {
-            confirmed: Some(validate_volume_capabilities_response::Confirmed {
+            confirmed: vec![validate_volume_capabilities_response::Confirmed {
                 volume_capabilities: req.volume_capabilities.clone(),
                 ..Default::default()
-            }),
+            }],
             ..Default::default()
         }))
     }
