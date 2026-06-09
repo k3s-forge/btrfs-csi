@@ -249,7 +249,7 @@ impl Controller for CsiController {
         // Apply NOCOW if profile requests it
         if profile.nocow {
             let _ = tokio::process::Command::new("chattr")
-                .args(["+N", &subvol_path])
+                .args(["+C", &subvol_path])
                 .output()
                 .await;
         }
@@ -455,6 +455,23 @@ impl Controller for CsiController {
         // Security: validate snapshot name
         validate_volume_name(&req.name)?;
 
+        // Idempotency: check if snapshot already exists
+        {
+            let snapshots = self.snapshots.read().await;
+            if let Some(existing) = snapshots.values().find(|s| s.name == req.name) {
+                tracing::info!("Snapshot {} already exists (id={})", req.name, existing.id);
+                return Ok(Response::new(CreateSnapshotResponse {
+                    snapshot: Some(Snapshot {
+                        snapshot_id: existing.id.clone(),
+                        source_volume_id: existing.source_volume_id.clone(),
+                        creation_time: existing.creation_time,
+                        size_bytes: existing.size as i64,
+                        ..Default::default()
+                    }),
+                }));
+            }
+        }
+
         let vol = {
             let volumes = self.volumes.read().await;
             volumes.get(&req.source_volume_id).cloned()
@@ -555,6 +572,37 @@ impl Controller for CsiController {
         tracing::info!("CSI ControllerExpandVolume: {}", req.volume_id);
 
         let new_capacity = req.capacity_range.as_ref().map(|r| r.required_bytes).unwrap_or(0);
+
+        // Resize the btrfs filesystem
+        let vol = {
+            let volumes = self.volumes.read().await;
+            volumes.get(&req.volume_id).cloned()
+        };
+
+        if let Some(vol) = vol {
+            let subvol_path = format!("{}/{}", self.data_dir, vol.name);
+            let output = tokio::process::Command::new("btrfs")
+                .args(["filesystem", "resize", "max", &subvol_path])
+                .output()
+                .await;
+
+            match output {
+                Ok(o) if o.status.success() => {
+                    tracing::info!("Resized volume {} to max", req.volume_id);
+                }
+                Ok(o) => {
+                    let stderr = String::from_utf8_lossy(&o.stderr);
+                    tracing::warn!("btrfs resize failed: {}", stderr);
+                }
+                Err(e) => tracing::warn!("Failed to execute btrfs resize: {}", e),
+            }
+
+            // Update stored size
+            if let Some(mut vol) = self.volumes.write().await.get_mut(&req.volume_id) {
+                vol.size = new_capacity as u64;
+            }
+            let _ = self.persist_volumes().await;
+        }
 
         Ok(Response::new(ControllerExpandVolumeResponse {
             capacity_bytes: new_capacity,

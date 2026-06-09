@@ -116,6 +116,11 @@ impl ReplicationReceiver {
                         }
                     }
                     MessageType::SendComplete => {
+                        // Extract sender's checksum from the completion message
+                        let sender_checksum: Option<String> = serde_json::from_slice(&msg.payload)
+                            .ok()
+                            .and_then(|r: SendCompleteResponse| r.checksum);
+
                         info!(
                             "Send complete for {}: {} bytes ({} chunks)",
                             start_req.volume_id, total_bytes, chunk_count
@@ -158,18 +163,38 @@ impl ReplicationReceiver {
         }
 
         // Compute checksum for verification
-        let checksum = hasher.finalize().to_hex().to_string();
+        let receiver_checksum = hasher.finalize().to_hex().to_string();
         info!(
-            "Volume {} received successfully ({} bytes, checksum={})",
-            start_req.volume_id, total_bytes, checksum
+            "Volume {} received ({} bytes, checksum={})",
+            start_req.volume_id, total_bytes, receiver_checksum
         );
+
+        // Verify checksum against sender's
+        let checksum_ok = match &sender_checksum {
+            Some(expected) => {
+                let ok = *expected == receiver_checksum;
+                if ok {
+                    info!("Checksum verified for {}", start_req.volume_id);
+                } else {
+                    error!(
+                        "Checksum MISMATCH for {}: sender={}, receiver={}",
+                        start_req.volume_id, expected, receiver_checksum
+                    );
+                }
+                ok
+            }
+            None => {
+                warn!("No checksum from sender for {}", start_req.volume_id);
+                true // No checksum to compare, accept
+            }
+        };
 
         // Send completion with checksum
         let complete = SendCompleteResponse {
             volume_id: start_req.volume_id,
-            success: true,
-            error: None,
-            checksum: Some(checksum),
+            success: checksum_ok,
+            error: if !checksum_ok { Some("Checksum mismatch".to_string()) } else { None },
+            checksum: Some(receiver_checksum),
         };
         let complete_msg = Message::new(
             MessageType::SendComplete,

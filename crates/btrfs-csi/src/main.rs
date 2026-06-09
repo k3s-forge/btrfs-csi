@@ -207,8 +207,13 @@ async fn main() -> Result<()> {
         _ = serve_handle => {}
         _ = shutdown_signal => {
             info!("Shutting down gracefully...");
+
+            // Notify peers we're leaving
+            info!("Sending NodeLeave to peers...");
+            gossip.leave_cluster().await;
+
             // Give in-flight RPCs time to complete
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             info!("Shutdown complete");
         }
     }

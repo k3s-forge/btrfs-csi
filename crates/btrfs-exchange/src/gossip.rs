@@ -47,6 +47,17 @@ impl GossipService {
             self.config.listen_addr, self.config.listen_port
         );
 
+        // Start TCP listener for incoming gossip messages
+        let config = self.config.clone();
+        let transport = TcpTransport::new(config.auth_key.as_bytes());
+        let peers = self.peers.clone();
+        let on_node_failure = self.on_node_failure.clone();
+        let local_volumes = self.local_volumes.clone();
+
+        tokio::spawn(async move {
+            Self::listener_loop(config, transport, peers, on_node_failure, local_volumes).await;
+        });
+
         // Start heartbeat sender
         let config = self.config.clone();
         let transport = TcpTransport::new(config.auth_key.as_bytes());
@@ -104,6 +115,131 @@ impl GossipService {
                 Err(e) => {
                     warn!("Failed to connect to seed node {}: {}", addr, e);
                 }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// TCP listener for incoming gossip messages (heartbeats, join, leave)
+    async fn listener_loop(
+        config: ExchangeConfig,
+        transport: TcpTransport,
+        peers: Arc<RwLock<HashMap<String, NodeInfo>>>,
+        on_node_failure: Arc<RwLock<Vec<NodeFailureCallback>>>,
+        local_volumes: Arc<RwLock<Vec<VolumeInfo>>>,
+    ) {
+        let addr: SocketAddr = match format!("{}:{}", config.listen_addr, config.listen_port).parse() {
+            Ok(a) => a,
+            Err(e) => {
+                error!("Invalid gossip listen address: {}", e);
+                return;
+            }
+        };
+
+        let listener = match transport.listen(addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                error!("Failed to bind gossip listener on {}: {}", addr, e);
+                return;
+            }
+        };
+
+        info!("Gossip listener ready on {}", addr);
+
+        loop {
+            match transport.accept(&listener).await {
+                Ok(mut conn) => {
+                    let config = config.clone();
+                    let peers = peers.clone();
+                    let on_node_failure = on_node_failure.clone();
+                    let local_volumes = local_volumes.clone();
+
+                    tokio::spawn(async move {
+                        if let Err(e) = Self::handle_gossip_message(
+                            &config, &mut conn, &peers, &on_node_failure, &local_volumes,
+                        ).await {
+                            debug!("Gossip message handler error: {}", e);
+                        }
+                    });
+                }
+                Err(e) => {
+                    warn!("Failed to accept gossip connection: {}", e);
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                }
+            }
+        }
+    }
+
+    /// Handle a single incoming gossip message
+    async fn handle_gossip_message(
+        config: &ExchangeConfig,
+        conn: &mut btrfs_protocol::transport::TransportConnection,
+        peers: &Arc<RwLock<HashMap<String, NodeInfo>>>,
+        on_node_failure: &Arc<RwLock<Vec<NodeFailureCallback>>>,
+        local_volumes: &Arc<RwLock<Vec<VolumeInfo>>>,
+    ) -> anyhow::Result<()> {
+        let msg = conn.recv_message().await.map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        match msg.msg_type {
+            MessageType::Heartbeat => {
+                let heartbeat: HeartbeatPayload = serde_json::from_slice(&msg.payload)?;
+                let now = chrono::Utc::now().timestamp_millis();
+
+                let node_info = NodeInfo {
+                    id: heartbeat.node_id.clone(),
+                    addr: heartbeat.addr,
+                    zone: heartbeat.zone,
+                    role: heartbeat.role,
+                    free_space: heartbeat.free_space,
+                    last_seen: now,
+                };
+
+                peers.write().await.insert(heartbeat.node_id.clone(), node_info);
+
+                // Reply with HeartbeatAck
+                let ack = Message::new(MessageType::HeartbeatAck, vec![]);
+                conn.send_message(&ack).await.map_err(|e| anyhow::anyhow!("{}", e))?;
+            }
+            MessageType::NodeJoin => {
+                let heartbeat: HeartbeatPayload = serde_json::from_slice(&msg.payload)?;
+                let now = chrono::Utc::now().timestamp_millis();
+
+                info!("Node joining: {} ({})", heartbeat.node_id, heartbeat.addr);
+
+                let node_info = NodeInfo {
+                    id: heartbeat.node_id.clone(),
+                    addr: heartbeat.addr,
+                    zone: heartbeat.zone,
+                    role: heartbeat.role,
+                    free_space: heartbeat.free_space,
+                    last_seen: now,
+                };
+
+                peers.write().await.insert(heartbeat.node_id.clone(), node_info);
+
+                // Respond with current peer list
+                let current_peers: Vec<NodeInfo> = peers.read().await.values().cloned().collect();
+                let payload = serde_json::to_vec(&current_peers)?;
+                let response = Message::new(MessageType::NodeList, payload);
+                conn.send_message(&response).await.map_err(|e| anyhow::anyhow!("{}", e))?;
+            }
+            MessageType::NodeLeave => {
+                let heartbeat: HeartbeatPayload = serde_json::from_slice(&msg.payload)?;
+                info!("Node leaving: {}", heartbeat.node_id);
+
+                peers.write().await.remove(&heartbeat.node_id);
+
+                let callbacks = on_node_failure.read().await;
+                for callback in callbacks.iter() {
+                    callback(heartbeat.node_id.clone());
+                }
+            }
+            MessageType::HeartbeatAck => {
+                // No-op, just acknowledge
+            }
+            _ => {
+                debug!("Unexpected gossip message type: {:?}", msg.msg_type);
             }
         }
 
@@ -274,6 +410,19 @@ impl GossipService {
         }
 
         selected
+    /// Send NodeLeave to all peers
+    pub async fn leave_cluster(&self) {
+        let payload = serde_json::to_vec(&self.create_heartbeat_payload()).unwrap_or_default();
+        let peers_snapshot = self.peers.read().await.clone();
+
+        for (_, node_info) in &peers_snapshot {
+            if let Ok(addr) = node_info.addr.parse::<SocketAddr>() {
+                if let Ok(mut conn) = self.transport.connect(addr).await {
+                    let msg = Message::new(MessageType::NodeLeave, payload.clone());
+                    let _ = conn.send_message(&msg).await;
+                }
+            }
+        }
     }
 }
 

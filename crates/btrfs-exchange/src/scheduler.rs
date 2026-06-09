@@ -133,29 +133,63 @@ impl ReplicaScheduler {
         }
     }
 
-    async fn snapshot_cleanup_loop(config: ExchangeConfig, replicator: Arc<Replicator>) {
+    async fn snapshot_cleanup_loop(config: ExchangeConfig, _replicator: Arc<Replicator>) {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(86400));
         loop {
             interval.tick().await;
             if !config.maintenance.enabled { continue; }
 
-            let data_dir = &config.replication.data_dir;
+            let retention = &config.maintenance.snapshot_retention;
+            let snap_dir = &config.replication.snapshot_dir;
+
             match tokio::process::Command::new("btrfs")
-                .args(["subvolume", "list", "-s", data_dir])
+                .args(["subvolume", "list", "-s", snap_dir])
                 .output()
                 .await
             {
                 Ok(o) if o.status.success() => {
                     let stdout = String::from_utf8_lossy(&o.stdout);
                     let snap_count = stdout.lines().count();
-                    let retention = &config.maintenance.snapshot_retention;
-                    let max_keep = retention.daily + retention.weekly + retention.monthly;
 
-                    if snap_count > max_keep as usize {
-                        info!("Snapshot cleanup: {} snapshots found, keeping {}", snap_count, max_keep);
-                        // TODO: Implement selective deletion based on retention policy
+                    if snap_count > (retention.daily + retention.weekly + retention.monthly) as usize {
+                        info!(
+                            "Snapshot cleanup: {} snapshots, retention daily={} weekly={} monthly={}",
+                            snap_count, retention.daily, retention.weekly, retention.monthly
+                        );
+
+                        // Delete old snapshots directly via btrfs subvolume delete
+                        // Parse snapshot list and delete oldest beyond retention
+                        let mut snapshots: Vec<(String, String)> = stdout.lines().filter_map(|line| {
+                            let parts: Vec<&str> = line.split_whitespace().collect();
+                            if parts.len() >= 7 && parts[0] == "ID" {
+                                let path = parts[6..].join(" ");
+                                let name = path.split('/').last()?.to_string();
+                                Some((name, path))
+                            } else {
+                                None
+                            }
+                        }).collect();
+
+                        // Sort by name (timestamp in name) - oldest first
+                        snapshots.sort_by(|a, b| a.0.cmp(&b.0));
+
+                        let max_keep = (retention.daily + retention.weekly + retention.monthly) as usize;
+                        let to_delete = snapshots.len().saturating_sub(max_keep);
+
+                        for (name, _) in snapshots.iter().take(to_delete) {
+                            let snap_path = format!("{}/{}", snap_dir, name);
+                            info!("Deleting old snapshot: {}", snap_path);
+                            let _ = tokio::process::Command::new("btrfs")
+                                .args(["subvolume", "delete", &snap_path])
+                                .output()
+                                .await;
+                        }
+
+                        if to_delete > 0 {
+                            info!("Cleaned up {} old snapshots", to_delete);
+                        }
                     } else {
-                        debug!("Snapshot count {} within retention limit {}", snap_count, max_keep);
+                        debug!("Snapshot count {} within retention limit", snap_count);
                     }
                 }
                 Ok(o) => {

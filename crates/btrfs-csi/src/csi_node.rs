@@ -41,7 +41,8 @@ impl Node for CsiNode {
             .map_err(|e| Status::internal(format!("Failed to bind mount: {}", e)))?;
 
         if !output.status.success() {
-            tracing::warn!("Bind mount: {}", String::from_utf8_lossy(&output.stderr));
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(Status::internal(format!("Bind mount failed: {}", stderr)));
         }
 
         Ok(Response::new(NodeStageVolumeResponse {}))
@@ -84,7 +85,8 @@ impl Node for CsiNode {
             .map_err(|e| Status::internal(format!("Failed to bind mount: {}", e)))?;
 
         if !output.status.success() {
-            tracing::warn!("Bind mount: {}", String::from_utf8_lossy(&output.stderr));
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(Status::internal(format!("Bind mount failed: {}", stderr)));
         }
 
         Ok(Response::new(NodePublishVolumeResponse {}))
@@ -97,12 +99,22 @@ impl Node for CsiNode {
         let req = request.into_inner();
         tracing::info!("CSI NodeUnpublishVolume: {}", req.volume_id);
 
-        let _ = tokio::process::Command::new("umount")
+        match tokio::process::Command::new("umount")
             .arg(&req.target_path)
             .output()
-            .await;
+            .await
+        {
+            Ok(o) if !o.status.success() => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                tracing::warn!("umount {} failed: {}", req.target_path, stderr);
+            }
+            Err(e) => tracing::warn!("Failed to execute umount: {}", e),
+            _ => {}
+        }
 
-        let _ = tokio::fs::remove_dir_all(&req.target_path).await;
+        if let Err(e) = tokio::fs::remove_dir_all(&req.target_path).await {
+            tracing::warn!("Failed to remove target dir {}: {}", req.target_path, e);
+        }
 
         Ok(Response::new(NodeUnpublishVolumeResponse {}))
     }
@@ -142,6 +154,23 @@ impl Node for CsiNode {
         tracing::info!("CSI NodeExpandVolume: {}", req.volume_id);
 
         let new_capacity = req.capacity_range.as_ref().map(|r| r.required_bytes).unwrap_or(0);
+
+        // Resize btrfs filesystem to max
+        let output = tokio::process::Command::new("btrfs")
+            .args(["filesystem", "resize", "max", &self.data_dir])
+            .output()
+            .await;
+
+        match output {
+            Ok(o) if o.status.success() => {
+                tracing::info!("Resized filesystem to max on {}", self.data_dir);
+            }
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                tracing::warn!("btrfs resize failed: {}", stderr);
+            }
+            Err(e) => tracing::warn!("Failed to execute btrfs resize: {}", e),
+        }
 
         Ok(Response::new(NodeExpandVolumeResponse { capacity_bytes: new_capacity }))
     }

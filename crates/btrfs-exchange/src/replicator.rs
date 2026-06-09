@@ -6,7 +6,7 @@ use btrfs_protocol::transport::TcpTransport;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 use tracing::{error, info, warn};
 
 use crate::config::ExchangeConfig;
@@ -46,6 +46,7 @@ pub struct Replicator {
     subvol_manager: SubvolumeManager,
     snap_manager: SnapshotManager,
     states: Arc<RwLock<HashMap<String, ReplicationState>>>,
+    concurrency_semaphore: Arc<Semaphore>,
 }
 
 impl Replicator {
@@ -54,6 +55,7 @@ impl Replicator {
         let transport = TcpTransport::new(config.auth_key.as_bytes());
         let subvol_manager = SubvolumeManager::new(&config.replication.data_dir);
         let snap_manager = SnapshotManager::new(&config.replication.snapshot_dir);
+        let max_concurrent = config.replication.max_concurrent as usize;
 
         Self {
             config,
@@ -62,6 +64,7 @@ impl Replicator {
             subvol_manager,
             snap_manager,
             states: Arc::new(RwLock::new(HashMap::new())),
+            concurrency_semaphore: Arc::new(Semaphore::new(max_concurrent)),
         }
     }
 
@@ -117,9 +120,18 @@ impl Replicator {
                 };
 
                 if should_retry {
-                    if let Err(e) = replicator.replicate_volume(&vol).await {
-                        error!("Failed to replicate volume {}: {}", vol, e);
-                    }
+                    // Acquire semaphore permit for concurrency limiting
+                    let permit = replicator.concurrency_semaphore.clone().acquire_owned().await;
+                    let Ok(_permit) = permit else { return };
+
+                    let replicator_clone = replicator.clone();
+                    let vol_clone = vol.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = replicator_clone.replicate_volume(&vol_clone).await {
+                            error!("Failed to replicate volume {}: {}", vol_clone, e);
+                        }
+                        drop(_permit);
+                    });
                 }
             }
         }
@@ -494,6 +506,7 @@ impl Clone for Replicator {
             subvol_manager: SubvolumeManager::new(&self.config.replication.data_dir),
             snap_manager: SnapshotManager::new(&self.config.replication.snapshot_dir),
             states: self.states.clone(),
+            concurrency_semaphore: self.concurrency_semaphore.clone(),
         }
     }
 }
