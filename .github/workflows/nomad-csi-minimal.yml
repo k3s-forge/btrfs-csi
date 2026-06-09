@@ -1,0 +1,14 @@
+name: Nomad CSI
+
+on:
+  workflow_dispatch:
+    inputs: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Hello
+        run: echo "workflow test"
