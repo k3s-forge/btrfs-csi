@@ -113,9 +113,9 @@ jobs:
            for i in $(seq 1 60); do
              sleep 5
              PLUGIN_OK=$(NOMAD_ADDR=http://127.0.0.1:14646 nomad plugin status btrfs-csi 2>/dev/null || true)
-             CTRL_HEALTHY=$(echo "$PLUGIN_OK" | grep "Controllers Healthy" | awk '{print $3}')
-             NODE_HEALTHY=$(echo "$PLUGIN_OK" | grep "Nodes Healthy" | awk '{print $3}')
-             if [ -n "$CTRL_HEALTHY" ] && [ "$CTRL_HEALTHY" -gt 0 ] && [ -n "$NODE_HEALTHY" ] && [ "$NODE_HEALTHY" -gt 0 ]; then
+             CTRL_HEALTHY=$(echo "$PLUGIN_OK" | grep "Controllers Healthy" | awk '{print $4}')
+             NODE_HEALTHY=$(echo "$PLUGIN_OK" | grep "Nodes Healthy" | awk '{print $4}')
+             if [ -n "$CTRL_HEALTHY" ] && [ "$CTRL_HEALTHY" -eq "$CTRL_HEALTHY" ] 2>/dev/null && [ "$CTRL_HEALTHY" -gt 0 ] && [ -n "$NODE_HEALTHY" ] && [ "$NODE_HEALTHY" -eq "$NODE_HEALTHY" ] 2>/dev/null && [ "$NODE_HEALTHY" -gt 0 ]; then
                echo "=== CSI Plugin Healthy! ==="
                NOMAD_ADDR=http://127.0.0.1:14646 nomad plugin status btrfs-csi; break
              fi
