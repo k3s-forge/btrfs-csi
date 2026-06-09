@@ -44,41 +44,19 @@ impl Identity for CsiIdentity {
     ) -> Result<Response<GetPluginCapabilitiesResponse>, Status> {
         tracing::info!("CSI GetPluginCapabilities called");
 
+        use crate::csi::get_plugin_capabilities_response::capability;
+
         let response = GetPluginCapabilitiesResponse {
             capabilities: vec![
-                // Controller service capability
-                GetPluginCapabilitiesResponse::Capability {
-                    r#type: Some(
-                        get_plugin_capabilities_response::capability::Type::Service(
-                            get_plugin_capabilities_response::capability::Service {
-                                r#type:
-                                    get_plugin_capabilities_response::capability::service::Type::ControllerService
-                                        as i32,
-                            },
-                        ),
-                    ),
+                capability::Capability {
+                    r#type: Some(capability::Type::Service(capability::Service {
+                        r#type: capability::service::Type::ControllerService as i32,
+                    })),
                 },
-                // Volume accessibility constraints (we have topology zones)
-                GetPluginCapabilitiesResponse::Capability {
-                    r#type: Some(
-                        get_plugin_capabilities_response::capability::Type::Service(
-                            get_plugin_capabilities_response::capability::Service {
-                                r#type:
-                                    get_plugin_capabilities_response::capability::service::Type::VolumeAccessibilityConstraints
-                                        as i32,
-                            },
-                        ),
-                    ),
-                },
-                // Volume capability: SINGLE_NODE_WRITER
-                GetPluginCapabilitiesResponse::Capability {
-                    r#type: Some(
-                        get_plugin_capabilities_response::capability::Type::VolumeCapability(
-                            crate::csi::get_plugin_capabilities_response::capability::VolumeCapability {
-                                // This is the volume access mode we support
-                            },
-                        ),
-                    ),
+                capability::Capability {
+                    r#type: Some(capability::Type::Service(capability::Service {
+                        r#type: capability::service::Type::VolumeAccessibilityConstraints as i32,
+                    })),
                 },
             ],
         };
@@ -92,7 +70,6 @@ impl Identity for CsiIdentity {
     ) -> Result<Response<ProbeResponse>, Status> {
         tracing::debug!("CSI Probe called");
 
-        // Check if btrfs is available
         let ready = std::process::Command::new("btrfs")
             .arg("version")
             .output()
