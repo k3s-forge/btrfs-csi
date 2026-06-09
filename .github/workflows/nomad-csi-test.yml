@@ -1,0 +1,356 @@
+name: Nomad Cluster CSI Test
+
+on:
+  push:
+    paths:
+      - 'nomad-csi-trigger'
+  workflow_dispatch:
+
+jobs:
+  nomad-csi:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y btrfs-progs protobuf-compiler jq
+
+    - name: Install Nomad
+      uses: hashicorp/setup-nomad@main
+      with:
+        version: "1.8.0"
+
+    - name: Verify tools
+      run: |
+        nomad version
+        btrfs --version
+        protoc --version
+
+    - name: Build CSI driver
+      run: cargo build --release
+
+    - name: Setup btrfs filesystems
+      run: |
+        echo "=== Creating btrfs filesystems ==="
+        sudo truncate -s 10G /tmp/btrfs-csi-data.img
+        sudo mkfs.btrfs -f -d single -m dup /tmp/btrfs-csi-data.img
+        sudo mkdir -p /mnt/btrfs/data /mnt/btrfs/snapshots
+        sudo mount -o loop /tmp/btrfs-csi-data.img /mnt/btrfs/data
+        echo "Primary: $(df -h /mnt/btrfs/data | tail -1 | awk '{print $4}')"
+        sudo truncate -s 10G /tmp/btrfs-replica.img
+        sudo mkfs.btrfs -f -d single -m dup /tmp/btrfs-replica.img
+        sudo mkdir -p /mnt/btrfs/replica-data /mnt/btrfs/replica-snapshots
+        sudo mount -o loop /tmp/btrfs-replica.img /mnt/btrfs/replica-data
+        echo "Replica: $(df -h /mnt/btrfs/replica-data | tail -1 | awk '{print $4}')"
+
+    - name: Create CSI entrypoint script
+      run: |
+        sudo tee /usr/local/bin/btrfs-csi-entrypoint.sh > /dev/null << 'WRAPPER'
+#!/bin/bash
+set -e
+NODE_NAME="${NOMAD_META_NODE_NAME:-unknown}"
+CSI_ENDPOINT="${CSI_ENDPOINT:-unix:///var/tmp/csi/csi.sock}"
+DATA_DIR="${NOMAD_META_DATA_DIR:-/mnt/btrfs/data}"
+SNAP_DIR="${NOMAD_META_SNAP_DIR:-/mnt/btrfs/snapshots}"
+mkdir -p /var/tmp/csi
+cat > /tmp/btrfs-csi-config-${NODE_NAME}.toml << CONFEOF
+node_id = "${NODE_NAME}"
+zone = "dc1"
+auth_key = "test-key-for-nomad-csi-testing-2026"
+seed_nodes = []
+gossip_interval = 10
+heartbeat_interval = 30
+node_timeout = 90
+[replication]
+default_replica_count = 1
+default_interval = 30
+max_concurrent = 4
+data_dir = "${DATA_DIR}"
+snapshot_dir = "${SNAP_DIR}"
+enable_incremental = true
+[maintenance]
+enabled = false
+CONFEOF
+exec /home/runner/work/btrfs-csi/btrfs-csi/target/release/btrfs-csi \
+  --config /tmp/btrfs-csi-config-${NODE_NAME}.toml \
+  --endpoint "${CSI_ENDPOINT}" \
+  --node-id "${NODE_NAME}" \
+  -log-level debug
+WRAPPER
+        sudo chmod +x /usr/local/bin/btrfs-csi-entrypoint.sh
+        echo "Entrypoint created"
+
+    - name: Start Nomad cluster
+      run: |
+        set -e
+        sudo mkdir -p /tmp/nomad/server/data
+        cat > /tmp/nomad/server.hcl << 'SEOF'
+data_dir = "/tmp/nomad/server/data"
+bind_addr = "127.0.0.1"
+log_level = "INFO"
+server { enabled = true; bootstrap_expect = 1 }
+ports { http = 14646; rpc = 14647; serf = 14648 }
+SEOF
+        sudo nomad agent -config=/tmp/nomad/server.hcl > /tmp/nomad-server.log 2>&1 &
+        for i in $(seq 1 30); do
+          if curl -s http://127.0.0.1:14646/v1/status/leader 2>/dev/null | grep -q '"'; then
+            echo "Server ready"; break
+          fi
+          sleep 2; echo "  Waiting for leader... ($i)"
+        done
+        sudo mkdir -p /tmp/nomad/client/data
+        cat > /tmp/nomad/client.hcl << 'CEOF'
+data_dir = "/tmp/nomad/client/data"
+bind_addr = "127.0.0.1"
+log_level = "INFO"
+datacenter = "dc1"
+client {
+  enabled = true
+  servers = ["127.0.0.1:14647"]
+  meta {
+    node_name = "nomad-csi-node-1"
+    data_dir = "/mnt/btrfs/data"
+    snap_dir = "/mnt/btrfs/snapshots"
+  }
+}
+plugin "raw_exec" { config { enabled = true } }
+ports { http = 24646; rpc = 24647; serf = 24648 }
+advertise { http = "127.0.0.1"; rpc = "127.0.0.1"; serf = "127.0.0.1" }
+CEOF
+        NOMAD_ADDR=http://127.0.0.1:14646 sudo nomad agent -config=/tmp/nomad/client.hcl > /tmp/nomad-client.log 2>&1 &
+        for i in $(seq 1 15); do
+          sleep 3
+          NODES=$(NOMAD_ADDR=http://127.0.0.1:14646 nomad node status 2>/dev/null | grep -c "ready" || true)
+          echo "  Nodes ready: $NODES"
+          if [ "$NODES" -ge 1 ]; then
+            echo "=== Nomad cluster ready ==="
+            NOMAD_ADDR=http://127.0.0.1:14646 nomad node status
+            break
+          fi
+        done
+
+    - name: Deploy CSI plugin
+      run: |
+        set -e
+        cat > /tmp/csi-plugin.nomad << 'PEOF'
+job "btrfs-csi" {
+  type = "system"
+  datacenters = ["dc1"]
+  group "nodes" {
+    task "plugin" {
+      driver = "raw_exec"
+      config { command = "/usr/local/bin/btrfs-csi-entrypoint.sh" }
+      csi_plugin {
+        id = "btrfs-csi"
+        type = "monolith"
+        mount_dir = "/var/tmp/csi"
+        health_timeout = "120s"
+      }
+      resources { cpu = 500; memory = 256 }
+    }
+  }
+}
+PEOF
+        NOMAD_ADDR=http://127.0.0.1:14646 nomad job run /tmp/csi-plugin.nomad
+        echo "CSI plugin job submitted"
+        for i in $(seq 1 30); do
+          sleep 5
+          PLUGIN_OK=$(NOMAD_ADDR=http://127.0.0.1:14646 nomad plugin status btrfs-csi 2>/dev/null || true)
+          if echo "$PLUGIN_OK" | grep -q "Controllers Healthy"; then
+            echo "=== CSI Plugin Registered! ==="
+            NOMAD_ADDR=http://127.0.0.1:14646 nomad plugin status btrfs-csi
+            break
+          fi
+          echo "  Waiting for CSI plugin... ($i)"
+        done
+        NOMAD_ADDR=http://127.0.0.1:14646 nomad job status btrfs-csi
+
+    - name: "Test A: Create CSI Volume"
+      continue-on-error: true
+      run: |
+        NOMAD_ADDR=http://127.0.0.1:14646
+        cat > /tmp/vol-test-1.nomad << 'VEOF'
+id = "vol-test-1"
+name = "vol-test-1"
+type = "csi"
+plugin_id = "btrfs-csi"
+capacity_min = "1GiB"
+capacity_max = "10GiB"
+capability {
+  access_mode = "single-node-writer"
+  attachment_mode = "file-system"
+}
+VEOF
+        echo "=== Creating CSI Volume ==="
+        nomad volume create /tmp/vol-test-1.nomad
+        echo "=== Volume List ==="
+        nomad volume list
+        echo "=== Volume Status ==="
+        nomad volume status vol-test-1
+
+    - name: "Test B: Write Data via Batch Job"
+      continue-on-error: true
+      run: |
+        NOMAD_ADDR=http://127.0.0.1:14646
+        cat > /tmp/job-writer.nomad << 'WEOF'
+job "volume-writer" {
+  datacenters = ["dc1"]
+  type = "batch"
+  group "write" {
+    volume "data" {
+      type = "csi"
+      source = "vol-test-1"
+      read_only = false
+      attachment_mode = "file-system"
+      access_mode = "single-node-writer"
+    }
+    task "write" {
+      driver = "raw_exec"
+      config {
+        command = "/bin/bash"
+        args = ["-c", "echo 'HELLO_FROM_NOMAD_CSI' > /data/hello.txt && dd if=/dev/urandom of=/data/1mb.bin bs=1M count=1 2>/dev/null && sync && ls -la /data/ && echo 'WRITE_OK'"]
+      }
+      volume_mount { volume = "data"; destination = "/data" }
+      resources { cpu = 100; memory = 64 }
+    }
+  }
+}
+WEOF
+        echo "=== Submitting write job ==="
+        nomad job run /tmp/job-writer.nomad
+        for i in $(seq 1 15); do
+          sleep 3
+          STATUS=$(nomad job status volume-writer 2>/dev/null | grep "^Status" | awk '{print $2}' || echo "pending")
+          echo "  Status: $STATUS"
+          if [ "$STATUS" = "dead" ] || [ "$STATUS" = "complete" ]; then break; fi
+        done
+        ALLOC_ID=$(nomad job allocs volume-writer 2>/dev/null | grep -v "ID" | awk '{print $1}' | head -1)
+        if [ -n "$ALLOC_ID" ]; then
+          echo "=== Write logs ==="
+          nomad alloc logs "$ALLOC_ID"
+        fi
+
+    - name: "Test C: Read Data from Volume"
+      continue-on-error: true
+      run: |
+        NOMAD_ADDR=http://127.0.0.1:14646
+        cat > /tmp/job-reader.nomad << 'REOF'
+job "volume-reader" {
+  datacenters = ["dc1"]
+  type = "batch"
+  group "read" {
+    volume "data" {
+      type = "csi"
+      source = "vol-test-1"
+      read_only = true
+      attachment_mode = "file-system"
+      access_mode = "single-node-writer"
+    }
+    task "read" {
+      driver = "raw_exec"
+      config {
+        command = "/bin/bash"
+        args = ["-c", "echo '=== Content ==='; cat /data/hello.txt 2>/dev/null; echo '=== Size ==='; ls -la /data/1mb.bin 2>/dev/null; echo 'READ_OK'"]
+      }
+      volume_mount { volume = "data"; destination = "/data" }
+      resources { cpu = 100; memory = 32 }
+    }
+  }
+}
+REOF
+        echo "=== Submitting read job ==="
+        nomad job run /tmp/job-reader.nomad
+        for i in $(seq 1 15); do
+          sleep 3
+          STATUS=$(nomad job status volume-reader 2>/dev/null | grep "^Status" | awk '{print $2}' || echo "pending")
+          echo "  Status: $STATUS"
+          if [ "$STATUS" = "dead" ] || [ "$STATUS" = "complete" ]; then break; fi
+        done
+        ALLOC_ID=$(nomad job allocs volume-reader 2>/dev/null | grep -v "ID" | awk '{print $1}' | head -1)
+        if [ -n "$ALLOC_ID" ]; then
+          echo "=== Read logs ==="
+          nomad alloc logs "$ALLOC_ID"
+        fi
+
+    - name: "Test D: Verify Btrfs Data Directly"
+      continue-on-error: true
+      run: |
+        echo "=== CSI volume on btrfs ==="
+        sudo btrfs subvolume list /mnt/btrfs/data/ 2>/dev/null || echo "  (none)"
+        sudo find /mnt/btrfs/data/ -name "hello.txt" -exec cat {} \; 2>/dev/null || echo "  Not found"
+        sudo find /mnt/btrfs/data/ -name "1mb.bin" -ls 2>/dev/null || echo "  Not found"
+        echo "=== Replica filesystem ==="
+        sudo btrfs subvolume list /mnt/btrfs/replica-data/ 2>/dev/null || echo "  (none)"
+        echo "=== Btrfs usage ==="
+        sudo btrfs filesystem usage /mnt/btrfs/data/ 2>/dev/null | head -8
+
+    - name: "Test E: Direct Btrfs Replication"
+      continue-on-error: true
+      run: |
+        echo "=== Direct btrfs send/receive ==="
+        sudo btrfs subvolume create /mnt/btrfs/data/repl-test
+        sudo dd if=/dev/urandom of=/mnt/btrfs/data/repl-test/data.bin bs=1M count=100 2>/dev/null
+        sudo sync
+        sudo btrfs subvolume snapshot -r /mnt/btrfs/data/repl-test /mnt/btrfs/snapshots/repl-snap
+        START=$(date +%s%N)
+        sudo btrfs send /mnt/btrfs/snapshots/repl-snap 2>/dev/null | sudo btrfs receive /mnt/btrfs/replica-data/ 2>/dev/null
+        DURATION=$(( ($(date +%s%N) - START) / 1000000 ))
+        echo "Replication: ${DURATION}ms"
+        sudo ls -la /mnt/btrfs/replica-data/repl-snap/
+        sudo md5sum /mnt/btrfs/data/repl-test/data.bin /mnt/btrfs/replica-data/repl-snap/data.bin
+        sudo btrfs subvolume delete /mnt/btrfs/data/repl-test 2>/dev/null || true
+        sudo btrfs subvolume delete /mnt/btrfs/snapshots/repl-snap 2>/dev/null || true
+        sudo btrfs subvolume delete /mnt/btrfs/replica-data/repl-snap 2>/dev/null || true
+
+    - name: "Test F: Multiple CSI Volumes"
+      continue-on-error: true
+      run: |
+        NOMAD_ADDR=http://127.0.0.1:14646
+        CREATED=0; TOTAL=5
+        for i in $(seq 1 $TOTAL); do
+          cat > /tmp/vol-multi-$i.nomad << 'MEOF'
+id = "vol-multi-ID"
+name = "vol-multi-ID"
+type = "csi"
+plugin_id = "btrfs-csi"
+capacity_min = "100MiB"
+capacity_max = "1GiB"
+capability {
+  access_mode = "single-node-writer"
+  attachment_mode = "file-system"
+}
+MEOF
+          sed "s/ID/$i/g" /tmp/vol-multi-$i.nomad > /tmp/vol-multi-$i-final.nomad
+          if nomad volume create /tmp/vol-multi-$i-final.nomad 2>/dev/null; then
+            CREATED=$((CREATED + 1)); echo "  vol-multi-$i OK"
+          else
+            echo "  vol-multi-$i FAILED"
+          fi
+        done
+        echo "=== Multi-volume: $CREATED/$TOTAL ==="
+        nomad volume list
+        for i in $(seq 1 $TOTAL); do
+          nomad volume delete vol-multi-$i 2>/dev/null || true
+        done
+        echo "Done"
+
+    - name: Cleanup
+      if: always()
+      run: |
+        NOMAD_ADDR=http://127.0.0.1:14646
+        nomad job stop -purge btrfs-csi 2>/dev/null || true
+        nomad job stop -purge volume-writer 2>/dev/null || true
+        nomad job stop -purge volume-reader 2>/dev/null || true
+        sleep 3
+        nomad volume delete vol-test-1 2>/dev/null || true
+        sudo pkill -f "nomad agent" 2>/dev/null || true
+        sleep 3
+        sudo umount /mnt/btrfs/data 2>/dev/null || true
+        sudo umount /mnt/btrfs/replica-data 2>/dev/null || true
+        sudo rm -f /tmp/btrfs-csi-data.img /tmp/btrfs-replica.img
+        sudo rm -rf /tmp/nomad /var/tmp/csi
+        echo "Cleanup complete"
