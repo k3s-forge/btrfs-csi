@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package csi.v1;
+package csi;
 
 // CSI Identity Service
 service Identity {
