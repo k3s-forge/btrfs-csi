@@ -40,14 +40,16 @@ jobs:
           # Sender filesystem
           sudo truncate -s 5G /tmp/repl-sender.img
           sudo mkfs.btrfs -f -d single -m dup /tmp/repl-sender.img
-          sudo mkdir -p /mnt/btrfs/sender-data /mnt/btrfs/sender-snapshots
+          sudo mkdir -p /mnt/btrfs/sender-data
           sudo mount -o loop /tmp/repl-sender.img /mnt/btrfs/sender-data
+          sudo mkdir -p /mnt/btrfs/sender-data/snapshots
 
           # Receiver filesystem
           sudo truncate -s 5G /tmp/repl-receiver.img
           sudo mkfs.btrfs -f -d single -m dup /tmp/repl-receiver.img
-          sudo mkdir -p /mnt/btrfs/receiver-data /mnt/btrfs/receiver-snapshots
+          sudo mkdir -p /mnt/btrfs/receiver-data
           sudo mount -o loop /tmp/repl-receiver.img /mnt/btrfs/receiver-data
+          sudo mkdir -p /mnt/btrfs/receiver-data/snapshots
 
           df -h /mnt/btrfs/sender-data /mnt/btrfs/receiver-data
           echo "=== Btrfs filesystems ready ==="
@@ -70,7 +72,7 @@ jobs:
             'default_interval = 30' \
             'max_concurrent = 4' \
             'data_dir = "/mnt/btrfs/receiver-data"' \
-            'snapshot_dir = "/mnt/btrfs/receiver-snapshots"' \
+            'snapshot_dir = "/mnt/btrfs/receiver-data/snapshots"' \
             'enable_incremental = true' \
             '[replication.database]' \
             'enabled = true' \
@@ -108,7 +110,7 @@ jobs:
             'default_interval = 30' \
             'max_concurrent = 4' \
             'data_dir = "/mnt/btrfs/sender-data"' \
-            'snapshot_dir = "/mnt/btrfs/sender-snapshots"' \
+            'snapshot_dir = "/mnt/btrfs/sender-data/snapshots"' \
             'enable_incremental = true' \
             '[replication.database]' \
             'enabled = true' \
@@ -214,10 +216,10 @@ jobs:
       - name: "Test 2 - Create snapshot and replicate"
         run: |
           echo "=== Creating readonly snapshot ==="
-          sudo btrfs subvolume snapshot -r /mnt/btrfs/sender-data/test-vol /mnt/btrfs/sender-snapshots/test-vol-snap
+          sudo btrfs subvolume snapshot -r /mnt/btrfs/sender-data/test-vol /mnt/btrfs/sender-data/snapshots/test-vol-snap
 
           echo "=== Sending snapshot to receiver ==="
-          sudo btrfs send /mnt/btrfs/sender-snapshots/test-vol-snap | \
+          sudo btrfs send /mnt/btrfs/sender-data/snapshots/test-vol-snap | \
             sudo btrfs receive /mnt/btrfs/receiver-data/
 
           echo "=== Verifying received data ==="
@@ -273,10 +275,10 @@ jobs:
           sync
 
           echo "=== Creating new snapshot ==="
-          sudo btrfs subvolume snapshot -r /mnt/btrfs/sender-data/test-vol /mnt/btrfs/sender-snapshots/test-vol-snap2
+          sudo btrfs subvolume snapshot -r /mnt/btrfs/sender-data/test-vol /mnt/btrfs/sender-data/snapshots/test-vol-snap2
 
           echo "=== Incremental send ==="
-          sudo btrfs send -p /mnt/btrfs/sender-snapshots/test-vol-snap /mnt/btrfs/sender-snapshots/test-vol-snap2 | \
+          sudo btrfs send -p /mnt/btrfs/sender-data/snapshots/test-vol-snap /mnt/btrfs/sender-data/snapshots/test-vol-snap2 | \
             sudo btrfs receive /mnt/btrfs/receiver-data/
 
           echo "=== Verifying incremental data ==="
@@ -315,8 +317,8 @@ jobs:
           # Cleanup btrfs
           sudo btrfs subvolume delete /mnt/btrfs/receiver-data/test-vol-snap2 2>/dev/null || true
           sudo btrfs subvolume delete /mnt/btrfs/receiver-data/test-vol-snap 2>/dev/null || true
-          sudo btrfs subvolume delete /mnt/btrfs/sender-snapshots/test-vol-snap2 2>/dev/null || true
-          sudo btrfs subvolume delete /mnt/btrfs/sender-snapshots/test-vol-snap 2>/dev/null || true
+          sudo btrfs subvolume delete /mnt/btrfs/sender-data/snapshots/test-vol-snap2 2>/dev/null || true
+          sudo btrfs subvolume delete /mnt/btrfs/sender-data/snapshots/test-vol-snap 2>/dev/null || true
           sudo btrfs subvolume delete /mnt/btrfs/sender-data/test-vol 2>/dev/null || true
 
           sudo umount /mnt/btrfs/sender-data /mnt/btrfs/receiver-data 2>/dev/null || true
