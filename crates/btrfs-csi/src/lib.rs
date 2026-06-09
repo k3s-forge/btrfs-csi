@@ -1,5 +1,8 @@
-pub mod driver;
-pub mod server;
+pub mod csi_controller;
+pub mod csi_identity;
+pub mod csi_node;
+pub mod csi_server;
 
-pub use driver::BtrfsCsiDriver;
-pub use server::CsiServer;
+pub mod csi {
+    tonic::include_proto!("csi.v1");
+}
