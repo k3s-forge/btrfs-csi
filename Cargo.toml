@@ -59,6 +59,11 @@ blake3 = "1.5"
 # UUID
 uuid = { version = "1", features = ["v4"] }
 
+# gRPC / CSI
+tonic = "0.12"
+prost = "0.13"
+tonic-build = "0.12"
+
 # Metrics
 prometheus = "0.13"
 
@@ -67,3 +72,6 @@ async-trait = "0.1"
 
 # Futures
 futures = "0.3"
+
+# Tokio streams (for gRPC streaming)
+tokio-stream = { version = "0.1", features = ["net"] }
