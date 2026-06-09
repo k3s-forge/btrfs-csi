@@ -1,1 +1,1 @@
-Trigger Nomad CSI workflow - 2026-06-09 13:21:26
+fix: add advertise block to server HCL, remove all ; from HCL
