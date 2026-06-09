@@ -361,6 +361,9 @@ impl Replicator {
             .spawn()
             .context("Failed to spawn btrfs send")?;
 
+        // Take stderr before async read to avoid borrow issues
+        let mut stderr_output = child.stderr.take();
+
         let stdout = child.stdout.take().context("Failed to capture stdout")?;
         let mut reader = tokio::io::BufReader::new(stdout);
         let mut buffer = vec![0u8; 64 * 1024]; // 64KB chunks
@@ -383,15 +386,13 @@ impl Replicator {
         // Wait for btrfs send to complete
         let status = child.wait().await?;
         if !status.success() {
-            let stderr = child.stderr
-                .take()
-                .map(|mut s| {
-                    let mut buf = Vec::new();
-                    std::io::Read::read_to_end(&mut s, &mut buf).unwrap_or_default();
-                    String::from_utf8_lossy(&buf).to_string()
-                })
-                .unwrap_or_default();
-            return Err(anyhow::anyhow!("btrfs send failed: {}", stderr));
+            // Read stderr asynchronously
+            let mut stderr_buf = Vec::new();
+            if let Some(ref mut s) = stderr_output {
+                let _ = s.read_to_end(&mut stderr_buf).await;
+            }
+            let stderr_msg = String::from_utf8_lossy(&stderr_buf);
+            return Err(anyhow::anyhow!("btrfs send failed: {}", stderr_msg));
         }
 
         // Send completion
