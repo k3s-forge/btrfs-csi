@@ -27,5 +27,9 @@ tonic.workspace = true
 prost.workspace = true
 tokio-stream.workspace = true
 
+# ID generation
+uuid.workspace = true
+chrono.workspace = true
+
 [build-dependencies]
 tonic-build.workspace = true
