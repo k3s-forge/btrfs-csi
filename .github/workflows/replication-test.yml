@@ -55,83 +55,83 @@ jobs:
       - name: Write receiver config
         run: |
           cat > /tmp/receiver-config.toml << 'RECEIVER_EOF'
-          node_id = "receiver-node"
-          listen_addr = "127.0.0.1"
-          listen_port = 9201
-          zone = "test"
-          auth_key = "test-key-for-e2e-replication-2026"
-          seed_nodes = []
-          gossip_interval = 10
-          heartbeat_interval = 30
-          node_timeout = 90
+node_id = "receiver-node"
+listen_addr = "127.0.0.1"
+listen_port = 9201
+zone = "test"
+auth_key = "test-key-for-e2e-replication-2026"
+seed_nodes = []
+gossip_interval = 10
+heartbeat_interval = 30
+node_timeout = 90
 
-          [replication]
-          default_replica_count = 1
-          default_interval = 30
-          max_concurrent = 4
-          data_dir = "/mnt/btrfs/receiver-data"
-          snapshot_dir = "/mnt/btrfs/receiver-snapshots"
-          enable_incremental = true
+[replication]
+default_replica_count = 1
+default_interval = 30
+max_concurrent = 4
+data_dir = "/mnt/btrfs/receiver-data"
+snapshot_dir = "/mnt/btrfs/receiver-snapshots"
+enable_incremental = true
 
-          [replication.database]
-          enabled = true
-          sqlite_wal_mode = true
-          checkpoint_interval = 30
-          enable_nocow = false
+[replication.database]
+enabled = true
+sqlite_wal_mode = true
+checkpoint_interval = 30
+enable_nocow = false
 
-          [maintenance]
-          enabled = false
-          balance_schedule = "0 2 * * *"
-          balance_threshold = 0.7
-          scrub_schedule = "0 3 * * 0"
-          snapshot_cleanup_schedule = "0 4 * * *"
+[maintenance]
+enabled = false
+balance_schedule = "0 2 * * *"
+balance_threshold = 0.7
+scrub_schedule = "0 3 * * 0"
+snapshot_cleanup_schedule = "0 4 * * *"
 
-          [maintenance.snapshot_retention]
-          daily = 7
-          weekly = 4
-          monthly = 3
-          RECEIVER_EOF
+[maintenance.snapshot_retention]
+daily = 7
+weekly = 4
+monthly = 3
+RECEIVER_EOF
           echo "Receiver config written"
 
       - name: Write sender config
         run: |
           cat > /tmp/sender-config.toml << 'SENDER_EOF'
-          node_id = "sender-node"
-          listen_addr = "127.0.0.1"
-          listen_port = 9200
-          zone = "test"
-          auth_key = "test-key-for-e2e-replication-2026"
-          seed_nodes = ["127.0.0.1:9201"]
-          gossip_interval = 10
-          heartbeat_interval = 30
-          node_timeout = 90
+node_id = "sender-node"
+listen_addr = "127.0.0.1"
+listen_port = 9200
+zone = "test"
+auth_key = "test-key-for-e2e-replication-2026"
+seed_nodes = ["127.0.0.1:9201"]
+gossip_interval = 10
+heartbeat_interval = 30
+node_timeout = 90
 
-          [replication]
-          default_replica_count = 1
-          default_interval = 30
-          max_concurrent = 4
-          data_dir = "/mnt/btrfs/sender-data"
-          snapshot_dir = "/mnt/btrfs/sender-snapshots"
-          enable_incremental = true
+[replication]
+default_replica_count = 1
+default_interval = 30
+max_concurrent = 4
+data_dir = "/mnt/btrfs/sender-data"
+snapshot_dir = "/mnt/btrfs/sender-snapshots"
+enable_incremental = true
 
-          [replication.database]
-          enabled = true
-          sqlite_wal_mode = true
-          checkpoint_interval = 30
-          enable_nocow = false
+[replication.database]
+enabled = true
+sqlite_wal_mode = true
+checkpoint_interval = 30
+enable_nocow = false
 
-          [maintenance]
-          enabled = false
-          balance_schedule = "0 2 * * *"
-          balance_threshold = 0.7
-          scrub_schedule = "0 3 * * 0"
-          snapshot_cleanup_schedule = "0 4 * * *"
+[maintenance]
+enabled = false
+balance_schedule = "0 2 * * *"
+balance_threshold = 0.7
+scrub_schedule = "0 3 * * 0"
+snapshot_cleanup_schedule = "0 4 * * *"
 
-          [maintenance.snapshot_retention]
-          daily = 7
-          weekly = 4
-          monthly = 3
-          SENDER_EOF
+[maintenance.snapshot_retention]
+daily = 7
+weekly = 4
+monthly = 3
+SENDER_EOF
           echo "Sender config written"
 
       - name: Start receiver CSI driver
