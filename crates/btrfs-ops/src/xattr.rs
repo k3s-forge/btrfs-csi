@@ -45,7 +45,7 @@ pub async fn remove_csi_attr(path: &str, key: &str) -> Result<()> {
 /// Get all CSI xattrs from a subvolume path
 pub async fn get_all_csi_attrs(path: &str) -> Result<HashMap<String, String>> {
     let output = tokio::process::Command::new("getfattr")
-        .args(["-d", "--only-values", path])
+        .args(["-d", path])
         .output()
         .await
         .context("failed to execute getfattr")?;
@@ -57,9 +57,15 @@ pub async fn get_all_csi_attrs(path: &str) -> Result<HashMap<String, String>> {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     for line in stdout.lines() {
+        // Skip the "# file: ..." header line
+        if line.starts_with('#') {
+            continue;
+        }
         if let Some((key, value)) = line.split_once('=') {
             let k = key.trim().strip_prefix(CSI_XATTR_PREFIX).unwrap_or(key.trim());
-            attrs.insert(k.to_string(), value.trim().to_string());
+            // Remove surrounding quotes if present
+            let v = value.trim().trim_matches('"').to_string();
+            attrs.insert(k.to_string(), v);
         }
     }
     Ok(attrs)

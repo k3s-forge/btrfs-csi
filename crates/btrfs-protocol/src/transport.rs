@@ -30,9 +30,45 @@ pub enum TransportError {
 /// Result type for transport operations
 pub type Result<T> = std::result::Result<T, TransportError>;
 
-/// TCP transport with HMAC authentication
+/// AES-256-GCM payload encryptor
+struct PayloadCipher {
+    cipher: aes_gcm::Aes256Gcm,
+}
+
+impl PayloadCipher {
+    fn new(auth_key: &[u8]) -> Self {
+        use sha2::Digest;
+        let hash = sha2::Sha256::digest(auth_key);
+        let key = aes_gcm::Key::<aes_gcm::Aes256Gcm>::from_slice(&hash);
+        Self { cipher: aes_gcm::Aes256Gcm::new(key) }
+    }
+
+    fn encrypt(&self, plaintext: &[u8]) -> Vec<u8> {
+        use aes_gcm::aead::Aead;
+        let nonce_bytes: [u8; 12] = rand::random();
+        let nonce = aes_gcm::Nonce::from_slice(&nonce_bytes);
+        let ciphertext = self.cipher.encrypt(nonce, plaintext)
+            .expect("AES-GCM encryption should not fail");
+        let mut out = Vec::with_capacity(12 + ciphertext.len());
+        out.extend_from_slice(&nonce_bytes);
+        out.extend_from_slice(&ciphertext);
+        out
+    }
+
+    fn decrypt(&self, data: &[u8]) -> Option<Vec<u8>> {
+        use aes_gcm::aead::Aead;
+        if data.len() < 12 + 16 {
+            return None;
+        }
+        let nonce = aes_gcm::Nonce::from_slice(&data[..12]);
+        self.cipher.decrypt(nonce, &data[12..]).ok()
+    }
+}
+
+/// TCP transport with HMAC authentication and AES-256-GCM payload encryption
 pub struct TcpTransport {
     auth: HmacAuth,
+    auth_key: Vec<u8>,
 }
 
 impl TcpTransport {
@@ -40,6 +76,7 @@ impl TcpTransport {
     pub fn new(key: &[u8]) -> Self {
         Self {
             auth: HmacAuth::new(key, 30),
+            auth_key: key.to_vec(),
         }
     }
 
@@ -48,17 +85,21 @@ impl TcpTransport {
         let stream = TcpStream::connect(addr).await?;
         let mut conn = TransportConnection::new(stream);
 
-        // Send authentication
+        // Send authentication (cleartext)
         let (timestamp, signature) = self.auth.generate_token();
         let auth_payload = HmacAuth::serialize_auth_payload(timestamp, &signature);
 
         let msg = Message::new(MessageType::Auth, auth_payload);
         conn.send_message(&msg).await?;
 
-        // Wait for auth response
+        // Wait for auth response (cleartext)
         let response = conn.recv_message().await?;
         match response.msg_type {
-            MessageType::AuthOk => Ok(conn),
+            MessageType::AuthOk => {
+                // Enable encryption for all subsequent messages
+                conn.cipher = Some(PayloadCipher::new(&self.auth_key));
+                Ok(conn)
+            }
             MessageType::AuthFailed => {
                 let error_msg = String::from_utf8(response.payload)
                     .unwrap_or_else(|_| "Unknown error".to_string());
@@ -84,7 +125,7 @@ impl TcpTransport {
 
         let mut conn = TransportConnection::new(stream);
 
-        // Wait for auth
+        // Wait for auth (cleartext)
         let msg = conn.recv_message().await?;
         match msg.msg_type {
             MessageType::Auth => {
@@ -96,6 +137,8 @@ impl TcpTransport {
                     Ok(()) => {
                         let response = Message::new(MessageType::AuthOk, vec![]);
                         conn.send_message(&response).await?;
+                        // Enable encryption for all subsequent messages
+                        conn.cipher = Some(PayloadCipher::new(&self.auth_key));
                         Ok(conn)
                     }
                     Err(e) => {
@@ -115,10 +158,11 @@ impl TcpTransport {
     }
 }
 
-/// A verified transport connection
+/// A verified, encrypted transport connection
 pub struct TransportConnection {
     stream: TcpStream,
     read_buf: BytesMut,
+    cipher: Option<PayloadCipher>,
 }
 
 impl TransportConnection {
@@ -126,26 +170,45 @@ impl TransportConnection {
         Self {
             stream,
             read_buf: BytesMut::with_capacity(64 * 1024),
+            cipher: None,
         }
     }
 
-    /// Send a message
+    /// Send a message (payload encrypted if cipher is active)
     pub async fn send_message(&mut self, msg: &Message) -> Result<()> {
-        let data = msg.encode();
+        let payload = match &self.cipher {
+            Some(cipher) => cipher.encrypt(&msg.payload),
+            None => msg.payload.clone(),
+        };
+        let wire_msg = Message {
+            msg_type: msg.msg_type,
+            payload,
+            timestamp: msg.timestamp,
+        };
+        let data = wire_msg.encode();
         self.stream.write_all(&data).await?;
         self.stream.flush().await?;
         Ok(())
     }
 
-    /// Receive a message
+    /// Receive a message (payload decrypted if cipher is active)
     pub async fn recv_message(&mut self) -> Result<Message> {
         loop {
-            // Try to decode from buffer
-            if let Some(msg) = Message::decode(&mut self.read_buf)? {
-                return Ok(msg);
+            if let Some(wire) = Message::decode(&mut self.read_buf)? {
+                let payload = match &self.cipher {
+                    Some(cipher) => cipher.decrypt(&wire.payload)
+                        .ok_or_else(|| TransportError::Protocol(
+                            "AES-GCM decryption failed".to_string()
+                        ))?,
+                    None => wire.payload,
+                };
+                return Ok(Message {
+                    msg_type: wire.msg_type,
+                    payload,
+                    timestamp: wire.timestamp,
+                });
             }
 
-            // Read more data
             let n = self
                 .stream
                 .read_buf(&mut self.read_buf)
