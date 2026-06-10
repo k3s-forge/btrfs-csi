@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y btrfs-progs protobuf-compiler jq
+        run: sudo apt-get update && sudo apt-get install -y btrfs-progs protobuf-compiler jq attr
       - name: Install Nomad
         uses: hashicorp/setup-nomad@main
         with:

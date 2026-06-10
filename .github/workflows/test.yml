@@ -19,7 +19,7 @@ jobs:
       uses: dtolnay/rust-toolchain@stable
 
     - name: Install btrfs-progs and protoc
-      run: sudo apt-get update && sudo apt-get install -y btrfs-progs protobuf-compiler
+      run: sudo apt-get update && sudo apt-get install -y btrfs-progs protobuf-compiler attr
 
     - name: Create btrfs test filesystem
       run: |

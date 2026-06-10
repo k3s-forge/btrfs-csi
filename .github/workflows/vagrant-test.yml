@@ -58,8 +58,8 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     
-    - name: Install btrfs-progs
-      run: sudo apt-get update && sudo apt-get install -y btrfs-progs
+    - name: Install btrfs-progs and attr
+      run: sudo apt-get update && sudo apt-get install -y btrfs-progs attr
 
     - name: Build CSI driver
       uses: dtolnay/rust-toolchain@stable
@@ -76,6 +76,7 @@ jobs:
         
         RUN apt-get update && apt-get install -y \
             btrfs-progs \
+            attr \
             curl \
             jq \
             iproute2 \

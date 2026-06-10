@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y btrfs-progs protobuf-compiler
+        run: sudo apt-get update && sudo apt-get install -y btrfs-progs protobuf-compiler attr
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
