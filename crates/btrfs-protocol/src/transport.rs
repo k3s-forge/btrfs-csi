@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{error, info, warn};
+use tracing::info;
 
 use crate::auth::HmacAuth;
 use crate::message::{Message, MessageType};
@@ -38,15 +38,14 @@ struct PayloadCipher {
 impl PayloadCipher {
     fn new(raw_key: &[u8]) -> Self {
         use chacha20poly1305::aead::KeyInit;
-        // auth_key is already 32 raw bytes, use directly as XChaCha20 key
-        let key = chacha20poly1305::Key::<chacha20poly1305::XChaCha20Poly1305>::from_slice(raw_key);
+        let key = chacha20poly1305::Key::from_slice(raw_key);
         Self { cipher: chacha20poly1305::XChaCha20Poly1305::new(key) }
     }
 
     fn encrypt(&self, plaintext: &[u8]) -> Vec<u8> {
-        use chacha20poly1305::aead::{Aead, generic_array::GenericArray};
+        use chacha20poly1305::aead::Aead;
         let nonce_bytes: [u8; 24] = rand::random();
-        let nonce = GenericArray::from_slice(&nonce_bytes);
+        let nonce = chacha20poly1305::XNonce::from_slice(&nonce_bytes);
         let ciphertext = self.cipher.encrypt(nonce, plaintext)
             .expect("XChaCha20-Poly1305 encryption should not fail");
         let mut out = Vec::with_capacity(24 + ciphertext.len());
@@ -56,11 +55,11 @@ impl PayloadCipher {
     }
 
     fn decrypt(&self, data: &[u8]) -> Option<Vec<u8>> {
-        use chacha20poly1305::aead::{Aead, generic_array::GenericArray};
+        use chacha20poly1305::aead::Aead;
         if data.len() < 24 + 16 {
             return None;
         }
-        let nonce = GenericArray::from_slice(&data[..24]);
+        let nonce = chacha20poly1305::XNonce::from_slice(&data[..24]);
         self.cipher.decrypt(nonce, &data[24..]).ok()
     }
 }
