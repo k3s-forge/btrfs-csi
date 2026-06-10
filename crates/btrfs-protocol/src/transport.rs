@@ -30,38 +30,39 @@ pub enum TransportError {
 /// Result type for transport operations
 pub type Result<T> = std::result::Result<T, TransportError>;
 
-/// AES-256-GCM payload encryptor
+/// XChaCha20-Poly1305 payload encryptor (24-byte nonce, pure ChaCha20, no AES-NI needed)
 struct PayloadCipher {
-    cipher: aes_gcm::Aes256Gcm,
+    cipher: chacha20poly1305::XChaCha20Poly1305,
 }
 
 impl PayloadCipher {
     fn new(auth_key: &[u8]) -> Self {
         use sha2::Digest;
         let hash = sha2::Sha256::digest(auth_key);
-        let key = aes_gcm::Key::<aes_gcm::Aes256Gcm>::from_slice(&hash);
-        Self { cipher: aes_gcm::Aes256Gcm::new(key) }
+        use chacha20poly1305::aead::KeyInit;
+        let key = chacha20poly1305::Key::<chacha20poly1305::XChaCha20Poly1305>::from_slice(&hash);
+        Self { cipher: chacha20poly1305::XChaCha20Poly1305::new(key) }
     }
 
     fn encrypt(&self, plaintext: &[u8]) -> Vec<u8> {
-        use aes_gcm::aead::Aead;
-        let nonce_bytes: [u8; 12] = rand::random();
-        let nonce = aes_gcm::Nonce::from_slice(&nonce_bytes);
+        use chacha20poly1305::aead::{Aead, generic_array::GenericArray};
+        let nonce_bytes: [u8; 24] = rand::random();
+        let nonce = GenericArray::from_slice(&nonce_bytes);
         let ciphertext = self.cipher.encrypt(nonce, plaintext)
-            .expect("AES-GCM encryption should not fail");
-        let mut out = Vec::with_capacity(12 + ciphertext.len());
+            .expect("XChaCha20-Poly1305 encryption should not fail");
+        let mut out = Vec::with_capacity(24 + ciphertext.len());
         out.extend_from_slice(&nonce_bytes);
         out.extend_from_slice(&ciphertext);
         out
     }
 
     fn decrypt(&self, data: &[u8]) -> Option<Vec<u8>> {
-        use aes_gcm::aead::Aead;
-        if data.len() < 12 + 16 {
+        use chacha20poly1305::aead::{Aead, generic_array::GenericArray};
+        if data.len() < 24 + 16 {
             return None;
         }
-        let nonce = aes_gcm::Nonce::from_slice(&data[..12]);
-        self.cipher.decrypt(nonce, &data[12..]).ok()
+        let nonce = GenericArray::from_slice(&data[..24]);
+        self.cipher.decrypt(nonce, &data[24..]).ok()
     }
 }
 
