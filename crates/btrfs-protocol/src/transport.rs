@@ -64,6 +64,14 @@ impl PayloadCipher {
     }
 }
 
+/// If the key isn't 64 hex chars or 32 raw bytes, hash it to 32 bytes.
+fn normalize_key(key: &[u8]) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(key);
+    hasher.finalize().to_vec()
+}
+
 /// TCP transport with HMAC authentication and XChaCha20-Poly1305 payload encryption
 pub struct TcpTransport {
     auth: HmacAuth,
@@ -71,14 +79,20 @@ pub struct TcpTransport {
 }
 
 impl TcpTransport {
-    /// Create a new transport with the given authentication key (hex string or raw 32 bytes)
+    /// Create a new transport with the given authentication key
+    ///
+    /// Accepts either a 64-char hex string (from `openssl rand -hex 32`) or exactly 32 raw bytes.
+    /// For any other length, hashes the key with SHA-256 to produce a 32-byte key.
     pub fn new(key: &[u8]) -> Self {
-        // auth_key is typically a 64-char hex string from `openssl rand -hex 32`
-        // Decode to 32 raw bytes for both HMAC auth and XChaCha20 cipher
         let raw_key = if key.len() == 64 {
-            hex::decode(key).unwrap_or_else(|_| key.to_vec())
-        } else {
+            hex::decode(key).unwrap_or_else(|_| {
+                // Not valid hex; treat as raw bytes, hash to 32 bytes if needed
+                normalize_key(key)
+            })
+        } else if key.len() == 32 {
             key.to_vec()
+        } else {
+            normalize_key(key)
         };
         Self {
             auth: HmacAuth::new(&raw_key, 30),

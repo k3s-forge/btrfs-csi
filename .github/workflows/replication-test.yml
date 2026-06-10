@@ -62,7 +62,7 @@ jobs:
             'listen_port = 9201' \
             'replication_port = 9301' \
             'zone = "test"' \
-            'auth_key = "test-key-for-e2e-replication-2026"' \
+            'auth_key = "5658a88afed33f2c9cc5e4212885b73cbd41e29f705a3d05376b6acab73bf17b"' \
             'seed_nodes = []' \
             'gossip_interval = 10' \
             'heartbeat_interval = 30' \
@@ -100,7 +100,7 @@ jobs:
             'listen_port = 9200' \
             'replication_port = 9300' \
             'zone = "test"' \
-            'auth_key = "test-key-for-e2e-replication-2026"' \
+            'auth_key = "5658a88afed33f2c9cc5e4212885b73cbd41e29f705a3d05376b6acab73bf17b"' \
             'seed_nodes = ["127.0.0.1:9201"]' \
             'gossip_interval = 10' \
             'heartbeat_interval = 30' \
