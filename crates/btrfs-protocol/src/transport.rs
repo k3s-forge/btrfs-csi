@@ -43,8 +43,8 @@ enum CipherKind {
 fn detect_hardware_aes() -> bool {
     #[cfg(target_arch = "x86_64")]
     {
-        if let Ok(cpuid) = raw_cpuid::CpuId::new() {
-            if let Some(features) = cpuid.get_feature_info() {
+        let cpuid = raw_cpuid::CpuId::new();
+        if let Some(features) = cpuid.get_feature_info() {
                 return features.has_aesni();
             }
         }
