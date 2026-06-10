@@ -54,15 +54,27 @@ impl CsiGrpcServer {
         let endpoint = self.endpoint.clone();
 
         if endpoint.starts_with("unix://") {
-            let socket_path = endpoint.trim_start_matches("unix://");
-            tracing::info!("CSI gRPC server starting on unix://{}", socket_path);
+            let socket_path = endpoint
+                .strip_prefix("unix://")
+                .unwrap_or(&endpoint)
+                .to_string();
+            let socket_path = socket_path.trim_start_matches('/');
+            if socket_path.is_empty() {
+                return Err(anyhow::anyhow!("unix:// endpoint must contain a path, e.g. unix:///var/run/csi.sock"));
+            }
+            let socket_path = format!("/{}", socket_path);
+            tracing::info!("CSI gRPC server starting on {}", socket_path);
 
-            let _ = tokio::fs::remove_file(socket_path).await;
-            if let Some(parent) = std::path::Path::new(socket_path).parent() {
+            if let Err(e) = tokio::fs::remove_file(&socket_path).await {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!("Failed to remove stale socket {}: {}", socket_path, e);
+                }
+            }
+            if let Some(parent) = std::path::Path::new(&socket_path).parent() {
                 tokio::fs::create_dir_all(parent).await?;
             }
 
-            let uds = UnixListener::bind(socket_path)?;
+            let uds = UnixListener::bind(&socket_path)?;
             let stream = UnixListenerStream::new(uds);
 
             Server::builder()

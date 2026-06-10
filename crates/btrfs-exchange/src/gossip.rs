@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use btrfs_protocol::message::{
     ConflictInfo, EpochInfo, HeartbeatPayload, Message, MessageType, NodeInfo,
     QuorumVoteRequest, QuorumVoteResponse,
@@ -68,10 +68,16 @@ impl GossipService {
         let on_node_failure = self.on_node_failure.clone();
         let on_conflict = self.on_conflict.clone();
         let volume_epochs = self.volume_epochs.clone();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
 
         tokio::spawn(async move {
-            Self::listener_loop(config, transport, peers, on_node_failure, on_conflict, volume_epochs).await;
+            Self::listener_loop(config, transport, peers, on_node_failure, on_conflict, volume_epochs, ready_tx).await;
         });
+
+        // Wait for listener to confirm bind success (propagate error if it failed)
+        ready_rx.await??;
+
+        info!("Gossip listener bound successfully");
 
         // Start heartbeat sender
         let config = self.config.clone();
@@ -143,19 +149,25 @@ impl GossipService {
         on_node_failure: Arc<RwLock<Vec<NodeFailureCallback>>>,
         on_conflict: Arc<RwLock<Vec<ConflictCallback>>>,
         volume_epochs: Arc<RwLock<HashMap<String, EpochInfo>>>,
+        ready_tx: tokio::sync::oneshot::Sender<anyhow::Result<()>>,
     ) {
         let addr: SocketAddr = match format!("{}:{}", config.listen_addr, config.listen_port).parse() {
             Ok(a) => a,
             Err(e) => {
                 error!("Invalid gossip listen address: {}", e);
+                let _ = ready_tx.send(Err(anyhow::anyhow!("Invalid gossip listen address: {}", e)));
                 return;
             }
         };
 
         let listener = match transport.listen(addr).await {
-            Ok(l) => l,
+            Ok(l) => {
+                let _ = ready_tx.send(Ok(()));
+                l
+            }
             Err(e) => {
                 error!("Failed to bind gossip listener on {}: {}", addr, e);
+                let _ = ready_tx.send(Err(anyhow::anyhow!("Failed to bind gossip listener on {}: {}", addr, e)));
                 return;
             }
         };

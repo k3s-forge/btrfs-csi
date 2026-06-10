@@ -5,6 +5,7 @@ use toml;
 
 /// Exchange engine configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExchangeConfig {
     /// Node identifier (auto-generated if empty)
     pub node_id: String,
@@ -71,6 +72,7 @@ impl ExchangeConfig {
 
 /// Volume profile for different workload types
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VolumeProfile {
     /// Profile name
     pub name: String,
@@ -145,6 +147,7 @@ impl VolumeProfile {
 
 /// Replication configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReplicationConfig {
     /// Default replica count
     pub default_replica_count: u32,
@@ -184,6 +187,7 @@ impl ReplicationConfig {
 
 /// Database-specific configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DatabaseConfig {
     /// Enable database-aware replication
     pub enabled: bool,
@@ -210,6 +214,7 @@ impl DatabaseConfig {
 
 /// Maintenance configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MaintenanceConfig {
     /// Enable automatic maintenance
     pub enabled: bool,
@@ -232,6 +237,7 @@ pub struct MaintenanceConfig {
 
 /// Snapshot retention policy
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SnapshotRetention {
     /// Daily snapshots to keep
     pub daily: u32,

@@ -574,9 +574,6 @@ impl Controller for CsiController {
     ) -> Result<Response<ValidateVolumeCapabilitiesResponse>, Status> {
         let req = request.into_inner();
 
-        let vol_id = req.volume_id.first()
-            .ok_or_else(|| Status::invalid_argument("volume_id is required"))?;
-
         let found = if let Ok(subvols) = tokio::fs::read_dir(&self.data_dir).await {
             use tokio_stream::wrappers::ReadDirStream;
             use tokio_stream::StreamExt;
@@ -584,7 +581,7 @@ impl Controller for CsiController {
             let mut ok = false;
             while let Some(Ok(entry)) = entries.next().await {
                 if let Ok(Some(vid)) = xattr::get_csi_attr(&entry.path().to_string_lossy(), "volume_id").await {
-                    if vid == *vol_id {
+                    if vid == req.volume_id {
                         ok = true;
                         break;
                     }
@@ -594,14 +591,16 @@ impl Controller for CsiController {
         } else { false };
 
         if !found {
-            return Err(Status::not_found(format!("Volume {} not found", vol_id)));
+            return Err(Status::not_found(format!("Volume {} not found", req.volume_id)));
         }
 
         Ok(Response::new(ValidateVolumeCapabilitiesResponse {
-            confirmed: vec![validate_volume_capabilities_response::Confirmed {
-                volume_capabilities: req.volume_capabilities.clone(),
-                ..Default::default()
-            }],
+            confirmed: req.volume_capabilities.iter().map(|cap| {
+                validate_volume_capabilities_response::Confirmed {
+                    volume_capabilities: Some(cap.clone()),
+                    ..Default::default()
+                }
+            }).collect(),
             ..Default::default()
         }))
     }
@@ -956,6 +955,22 @@ impl Controller for CsiController {
         }
 
         Err(Status::not_found(format!("Volume {} not found", req.volume_id)))
+    }
+
+    async fn controller_get_capabilities(
+        &self,
+        _request: Request<ControllerGetCapabilitiesRequest>,
+    ) -> Result<Response<ControllerGetCapabilitiesResponse>, Status> {
+        let cap = controller_get_capabilities_response::controller_capability::Rpc {
+            r#type: controller_get_capabilities_response::controller_capability::rpc::Type::CreateDeleteVolume.into(),
+        };
+        Ok(Response::new(ControllerGetCapabilitiesResponse {
+            capabilities: vec![
+                controller_get_capabilities_response::ControllerCapability {
+                    r#type: Some(controller_get_capabilities_response::controller_capability::Type::Rpc(cap)),
+                },
+            ],
+        }))
     }
 }
 

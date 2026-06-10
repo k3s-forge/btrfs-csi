@@ -50,6 +50,9 @@ service Controller {
 
   rpc ControllerGetVolume(ControllerGetVolumeRequest)
       returns (ControllerGetVolumeResponse) {}
+
+  rpc ControllerGetCapabilities(ControllerGetCapabilitiesRequest)
+      returns (ControllerGetCapabilitiesResponse) {}
 }
 
 // CSI Node Service
@@ -243,8 +246,8 @@ message ControllerUnpublishVolumeRequest {
 message ControllerUnpublishVolumeResponse {}
 
 message ValidateVolumeCapabilitiesRequest {
-  repeated string volume_id = 1;
-  VolumeCapability volume_capabilities = 2;
+  string volume_id = 1;
+  repeated VolumeCapability volume_capabilities = 2;
   map<string, string> parameters = 3;
   map<string, string> secrets = 4;
 }
@@ -334,6 +337,38 @@ message ControllerGetVolumeRequest {
 message ControllerGetVolumeResponse {
   Volume volume = 1;
   VolumeStatus status = 2;
+}
+
+message ControllerGetCapabilitiesRequest {}
+
+message ControllerGetCapabilitiesResponse {
+  repeated ControllerCapability capabilities = 1;
+
+  message ControllerCapability {
+    oneof type {
+      VolumeCapability volume_capability = 1;
+      RPC rpc = 2;
+    }
+  }
+
+  message RPC {
+    enum Type {
+      UNKNOWN = 0;
+      CREATE_DELETE_VOLUME = 1;
+      PUBLISH_UNPUBLISH_VOLUME = 2;
+      LIST_VOLUMES = 3;
+      GET_CAPACITY = 4;
+      CREATE_DELETE_SNAPSHOT = 5;
+      LIST_SNAPSHOTS = 6;
+      CLONE_VOLUME = 7;
+      PUBLISH_READONLY = 8;
+      EXPAND_VOLUME = 9;
+      LIST_VOLUMES_PUBLISHED_NODES = 10;
+      VOLUME_CONDITION = 11;
+      GET_VOLUME = 12;
+    }
+    Type type = 1;
+  }
 }
 
 // ========== Node Types ==========
