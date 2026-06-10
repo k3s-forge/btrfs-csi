@@ -169,9 +169,6 @@ async fn main() -> Result<()> {
         config.replication.volume_profiles.clone(),
     );
 
-    // Load persisted volumes and snapshots from disk
-    server.controller().load_from_disk().await;
-
     info!(
         "CSI driver ready on node {} (zone={})",
         config.node_id, config.zone

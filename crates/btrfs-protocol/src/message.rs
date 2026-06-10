@@ -218,7 +218,6 @@ pub struct HeartbeatPayload {
     pub zone: String,
     pub role: String,
     pub free_space: u64,
-    pub volumes: Vec<VolumeInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use btrfs_protocol::message::{HeartbeatPayload, Message, MessageType, NodeInfo, VolumeInfo};
+use btrfs_protocol::message::{HeartbeatPayload, Message, MessageType, NodeInfo};
 use btrfs_protocol::transport::TcpTransport;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -17,7 +17,6 @@ pub struct GossipService {
     config: ExchangeConfig,
     transport: TcpTransport,
     peers: Arc<RwLock<HashMap<String, NodeInfo>>>,
-    local_volumes: Arc<RwLock<Vec<VolumeInfo>>>,
     on_node_failure: Arc<RwLock<Vec<NodeFailureCallback>>>,
 }
 
@@ -30,7 +29,6 @@ impl GossipService {
             config,
             transport,
             peers: Arc::new(RwLock::new(HashMap::new())),
-            local_volumes: Arc::new(RwLock::new(Vec::new())),
             on_node_failure: Arc::new(RwLock::new(Vec::new())),
         }
     }
@@ -47,25 +45,23 @@ impl GossipService {
             self.config.listen_addr, self.config.listen_port
         );
 
-        // Start heartbeat sender
+        // Start listener for incoming gossip messages
         let config = self.config.clone();
         let transport = TcpTransport::new(config.auth_key.as_bytes());
         let peers = self.peers.clone();
         let on_node_failure = self.on_node_failure.clone();
-        let local_volumes = self.local_volumes.clone();
 
         tokio::spawn(async move {
-            Self::listener_loop(config, transport, peers, on_node_failure, local_volumes).await;
+            Self::listener_loop(config, transport, peers, on_node_failure).await;
         });
 
         // Start heartbeat sender
         let config = self.config.clone();
         let transport = TcpTransport::new(config.auth_key.as_bytes());
         let peers = self.peers.clone();
-        let local_volumes = self.local_volumes.clone();
 
         tokio::spawn(async move {
-            Self::heartbeat_loop(config, transport, peers, local_volumes).await;
+            Self::heartbeat_loop(config, transport, peers).await;
         });
 
         // Start peer cleanup
@@ -127,7 +123,6 @@ impl GossipService {
         transport: TcpTransport,
         peers: Arc<RwLock<HashMap<String, NodeInfo>>>,
         on_node_failure: Arc<RwLock<Vec<NodeFailureCallback>>>,
-        local_volumes: Arc<RwLock<Vec<VolumeInfo>>>,
     ) {
         let addr: SocketAddr = match format!("{}:{}", config.listen_addr, config.listen_port).parse() {
             Ok(a) => a,
@@ -153,11 +148,10 @@ impl GossipService {
                     let config = config.clone();
                     let peers = peers.clone();
                     let on_node_failure = on_node_failure.clone();
-                    let local_volumes = local_volumes.clone();
 
                     tokio::spawn(async move {
                         if let Err(e) = Self::handle_gossip_message(
-                            &config, &mut conn, &peers, &on_node_failure, &local_volumes,
+                            &config, &mut conn, &peers, &on_node_failure,
                         ).await {
                             debug!("Gossip message handler error: {}", e);
                         }
@@ -177,7 +171,6 @@ impl GossipService {
         conn: &mut btrfs_protocol::transport::TransportConnection,
         peers: &Arc<RwLock<HashMap<String, NodeInfo>>>,
         on_node_failure: &Arc<RwLock<Vec<NodeFailureCallback>>>,
-        local_volumes: &Arc<RwLock<Vec<VolumeInfo>>>,
     ) -> anyhow::Result<()> {
         let msg = conn.recv_message().await.map_err(|e| anyhow::anyhow!("{}", e))?;
 
@@ -251,7 +244,6 @@ impl GossipService {
         config: ExchangeConfig,
         transport: TcpTransport,
         peers: Arc<RwLock<HashMap<String, NodeInfo>>>,
-        local_volumes: Arc<RwLock<Vec<VolumeInfo>>>,
     ) {
         let mut interval = tokio::time::interval(config.heartbeat_interval_duration());
 
@@ -259,14 +251,12 @@ impl GossipService {
             interval.tick().await;
 
             let payload = {
-                let volumes = local_volumes.read().await;
                 let heartbeat = HeartbeatPayload {
                     node_id: config.node_id.clone(),
                     addr: format!("{}:{}", config.listen_addr, config.listen_port),
                     zone: config.zone.clone(),
                     role: "replica".to_string(),
                     free_space: get_free_space(&config.replication.data_dir),
-                    volumes: volumes.clone(),
                 };
                 serde_json::to_vec(&heartbeat).unwrap_or_default()
             };
@@ -355,11 +345,6 @@ impl GossipService {
     /// Get peer count
     pub async fn peer_count(&self) -> usize {
         self.peers.read().await.len()
-    }
-
-    /// Update local volumes
-    pub async fn update_volumes(&self, volumes: Vec<VolumeInfo>) {
-        *self.local_volumes.write().await = volumes;
     }
 
     /// Select replica targets for a volume
