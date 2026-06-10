@@ -177,9 +177,9 @@ jobs:
 
 
         def main():
-            host = "127.0.0.1"
-            port = 9201
-            auth_key = "test-key-12345678901234567890123456789012"
+            host = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
+            port = int(sys.argv[2]) if len(sys.argv) > 2 else 9201
+            auth_key = sys.argv[3] if len(sys.argv) > 3 else ""
 
             print("="*60)
             print("  CSI DRIVER TEST SUITE")
@@ -363,9 +363,46 @@ jobs:
 
     - name: Start CSI driver
       run: |
-        echo "bm9kZV9pZCA9ICJ0ZXN0LW5vZGUtMSIKbGlzdGVuX2FkZHIgPSAiMC4wLjAuMCIKbGlzdGVuX3BvcnQgPSA5MjAwCnpvbmUgPSAiZGMxIgphdXRoX2tleSA9ICJ0ZXN0LWtleS0xMjM0NTY3ODkwMTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMiIKc2VlZF9ub2RlcyA9IFtdCmdvc3NpcF9pbnRlcnZhbCA9IDEwCmhlYXJ0YmVhdF9pbnRlcnZhbCA9IDMwCm5vZGVfdGltZW91dCA9IDkwCgpbcmVwbGljYXRpb25dCmRlZmF1bHRfcmVwbGljYV9jb3VudCA9IDEKZGVmYXVsdF9pbnRlcnZhbCA9IDMwCm1heF9jb25jdXJyZW50ID0gNApkYXRhX2RpciA9ICIvbW50L2NzaS1kYXRhIgpzbmFwc2hvdF9kaXIgPSAiL21udC9jc2ktc25hcHNob3RzIgplbmFibGVfaW5jcmVtZW50YWwgPSB0cnVlCgpbcmVwbGljYXRpb24uZGF0YWJhc2VdCmVuYWJsZWQgPSBmYWxzZQpzcWxpdGVfd2FsX21vZGUgPSB0cnVlCmNoZWNrcG9pbnRfaW50ZXJ2YWwgPSAzMAplbmFibGVfbm9jb3cgPSBmYWxzZQoKW21haW50ZW5hbmNlXQplbmFibGVkID0gZmFsc2UKYmFsYW5jZV9zY2hlZHVsZSA9ICIwIDIgKiAqICoiCmJhbGFuY2VfdGhyZXNob2xkID0gMC43CnNjcnViX3NjaGVkdWxlID0gIjAgMyAqICogMCIKc25hcHNob3RfY2xlYW51cF9zY2hlZHVsZSA9ICIwIDQgKiAqICoiCgpbbWFpbnRlbmFuY2Uuc25hcHNob3RfcmV0ZW50aW9uXQpkYWlseSA9IDcKd2Vla2x5ID0gNAptb250aGx5ID0gMw==" | base64 -d > /tmp/csi-config.toml
-        echo "Config created:"
-        cat /tmp/csi-config.toml
+        AUTH_KEY=$(openssl rand -hex 32)
+        cat > /tmp/csi-config.toml <<CONFEOF
+        node_id = "test-node-1"
+        listen_addr = "0.0.0.0"
+        listen_port = 9200
+        zone = "dc1"
+        auth_key = "${AUTH_KEY}"
+        seed_nodes = []
+        gossip_interval = 10
+        heartbeat_interval = 30
+        node_timeout = 90
+
+        [replication]
+        default_replica_count = 1
+        default_interval = 30
+        max_concurrent = 4
+        data_dir = "/mnt/csi-data"
+        snapshot_dir = "/mnt/csi-snapshots"
+        enable_incremental = true
+
+        [replication.database]
+        enabled = false
+        sqlite_wal_mode = true
+        checkpoint_interval = 30
+        enable_nocow = false
+
+        [maintenance]
+        enabled = false
+        balance_schedule = "0 2 * * *"
+        balance_threshold = 0.7
+        scrub_schedule = "0 3 * * 0"
+        snapshot_cleanup_schedule = "0 4 * * *"
+
+        [maintenance.snapshot_retention]
+        daily = 7
+        weekly = 4
+        monthly = 3
+        CONFEOF
+        echo "Config created with runtime-generated auth key"
+        
         
         echo "Starting CSI driver on port 9201..."
         sudo timeout 300 ./target/release/btrfs-csi \
@@ -393,7 +430,7 @@ jobs:
 
     - name: Run CSI tests
       run: |
-        python3 /tmp/csi_client.py
+        python3 /tmp/csi_client.py 127.0.0.1 9201 "$AUTH_KEY"
 
     - name: Stop CSI driver
       if: always()

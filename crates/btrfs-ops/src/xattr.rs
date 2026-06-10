@@ -85,26 +85,34 @@ pub fn merge_vector_clocks(
     merged
 }
 
-/// Detect if two vector clocks have diverged (conflict)
+/// Detect if two vector clocks are concurrent (true conflict).
+///
+/// Two vector clocks conflict if neither one happens-before the other:
+///   !(local <= remote) && !(remote <= local)
+///
+/// Where A <= B iff for every node k, A[k] <= B[k].
 pub fn has_conflict(
     local: &HashMap<String, u64>,
     remote: &HashMap<String, u64>,
 ) -> bool {
-    for (node, local_epoch) in local {
-        if let Some(remote_epoch) = remote.get(node) {
-            if *remote_epoch > *local_epoch {
-                return true;
-            }
+    if local.is_empty() || remote.is_empty() {
+        return false;
+    }
+    let local_le_remote = vector_clock_le(local, remote);
+    let remote_le_local = vector_clock_le(remote, local);
+    !local_le_remote && !remote_le_local
+}
+
+/// Check if vector clock a happens-before or equals vector clock b.
+/// Returns true if a[k] <= b[k] for every node k present in a.
+fn vector_clock_le(a: &HashMap<String, u64>, b: &HashMap<String, u64>) -> bool {
+    for (node, epoch_a) in a {
+        let epoch_b = b.get(node).copied().unwrap_or(0);
+        if *epoch_a > epoch_b {
+            return false;
         }
     }
-    for (node, remote_epoch) in remote {
-        if let Some(local_epoch) = local.get(node) {
-            if *local_epoch > *remote_epoch {
-                return true;
-            }
-        }
-    }
-    false
+    true
 }
 
 /// Get volume status from xattr
@@ -123,7 +131,7 @@ pub async fn set_volume_status(path: &str, status: &str) -> Result<()> {
 pub async fn set_csi_attr(path: &str, key: &str, value: &str) -> Result<()> {
     let full_key = format!("{}{}", CSI_XATTR_PREFIX, key);
     tokio::process::Command::new("setfattr")
-        .args(["-n", &full_key, "-v", value, path])
+        .args(["-n", &full_key, "-v", value, "--", path])
         .output()
         .await
         .context("failed to execute setfattr")?;
@@ -134,7 +142,7 @@ pub async fn set_csi_attr(path: &str, key: &str, value: &str) -> Result<()> {
 pub async fn get_csi_attr(path: &str, key: &str) -> Result<Option<String>> {
     let full_key = format!("{}{}", CSI_XATTR_PREFIX, key);
     let output = tokio::process::Command::new("getfattr")
-        .args(["-n", &full_key, "--only-values", path])
+        .args(["-n", &full_key, "--only-values", "--", path])
         .output()
         .await
         .context("failed to execute getfattr")?;
@@ -152,7 +160,7 @@ pub async fn get_csi_attr(path: &str, key: &str) -> Result<Option<String>> {
 pub async fn remove_csi_attr(path: &str, key: &str) -> Result<()> {
     let full_key = format!("{}{}", CSI_XATTR_PREFIX, key);
     let _ = tokio::process::Command::new("setfattr")
-        .args(["-x", &full_key, path])
+        .args(["-x", &full_key, "--", path])
         .output()
         .await;
     Ok(())
@@ -161,7 +169,7 @@ pub async fn remove_csi_attr(path: &str, key: &str) -> Result<()> {
 /// Get all CSI xattrs from a subvolume path
 pub async fn get_all_csi_attrs(path: &str) -> Result<HashMap<String, String>> {
     let output = tokio::process::Command::new("getfattr")
-        .args(["-d", path])
+        .args(["-d", "--", path])
         .output()
         .await
         .context("failed to execute getfattr")?;
@@ -177,10 +185,14 @@ pub async fn get_all_csi_attrs(path: &str) -> Result<HashMap<String, String>> {
         if line.starts_with('#') {
             continue;
         }
-        if let Some((key, value)) = line.split_once('=') {
-            let k = key.trim().strip_prefix(CSI_XATTR_PREFIX).unwrap_or(key.trim());
-            // Remove surrounding quotes if present
-            let v = value.trim().trim_matches('"').to_string();
+        // getfattr -d outputs: user.csi.key="value"
+        // Use split_once with '=' but handle value quoting correctly
+        if let Some(eq_pos) = line.find('=') {
+            let key_part = &line[..eq_pos];
+            let val_part = &line[eq_pos + 1..];
+            let k = key_part.trim().strip_prefix(CSI_XATTR_PREFIX).unwrap_or(key_part.trim());
+            // Trim surrounding quotes and any trailing content
+            let v = val_part.trim().trim_matches('"').to_string();
             attrs.insert(k.to_string(), v);
         }
     }

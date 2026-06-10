@@ -28,13 +28,25 @@ usermod -aG docker vagrant
 sudo -u vagrant bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y'
 echo 'source $HOME/.cargo/env' >> /home/vagrant/.bashrc
 
-# Install Nomad
-wget -O- https://releases.hashicorp.com/nomad/1.7.5/nomad_1.7.5_linux_amd64.zip | gunzip > /usr/local/bin/nomad
+# Install Nomad with checksum verification
+NOMAD_VERSION=1.8.1
+wget -q "https://releases.hashicorp.com/nomad/${NOMAD_VERSION}/nomad_${NOMAD_VERSION}_linux_amd64.zip"
+wget -q "https://releases.hashicorp.com/nomad/${NOMAD_VERSION}/nomad_${NOMAD_VERSION}_SHA256SUMS"
+sha256sum -c --ignore-missing "nomad_${NOMAD_VERSION}_SHA256SUMS"
+unzip "nomad_${NOMAD_VERSION}_linux_amd64.zip" -d /tmp/nomad-install
+mv /tmp/nomad-install/nomad /usr/local/bin/nomad
 chmod +x /usr/local/bin/nomad
+rm -rf /tmp/nomad-install "nomad_${NOMAD_VERSION}_linux_amd64.zip" "nomad_${NOMAD_VERSION}_SHA256SUMS"
 
-# Install Consul (required for Nomad)
-wget -O- https://releases.hashicorp.com/consul/1.17.1/consul_1.17.1_linux_amd64.zip | gunzip > /usr/local/bin/consul
+# Install Consul with checksum verification
+CONSUL_VERSION=1.18.2
+wget -q "https://releases.hashicorp.com/consul/${CONSUL_VERSION}/consul_${CONSUL_VERSION}_linux_amd64.zip"
+wget -q "https://releases.hashicorp.com/consul/${CONSUL_VERSION}/consul_${CONSUL_VERSION}_SHA256SUMS"
+sha256sum -c --ignore-missing "consul_${CONSUL_VERSION}_SHA256SUMS"
+unzip "consul_${CONSUL_VERSION}_linux_amd64.zip" -d /tmp/consul-install
+mv /tmp/consul-install/consul /usr/local/bin/consul
 chmod +x /usr/local/bin/consul
+rm -rf /tmp/consul-install "consul_${CONSUL_VERSION}_linux_amd64.zip" "consul_${CONSUL_VERSION}_SHA256SUMS"
 
 # Create btrfs data partition
 truncate -s 20G /mnt/btrfs-data.img
@@ -61,7 +73,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/btrfs-csi --config /etc/btrfs-csi/config.toml --endpoint 0.0.0.0:9201
+ExecStart=/usr/local/bin/btrfs-csi --config /etc/btrfs-csi/config.toml --endpoint unix:///csi/csi.sock
 Restart=always
 RestartSec=5
 User=vagrant
@@ -73,13 +85,13 @@ EOF
 
 # Create CSI config
 mkdir -p /etc/btrfs-csi
+AUTH_KEY=$(openssl rand -hex 32)
 cat > /etc/btrfs-csi/config.toml <<EOF
-[node]
 node_id = "$NODE_NAME"
 listen_addr = "0.0.0.0"
 listen_port = 9200
 zone = "dc1"
-auth_key = "$(openssl rand -hex 32)"
+auth_key = "$AUTH_KEY"
 seed_nodes = ["192.168.56.11:9200"]
 
 [replication]
@@ -133,14 +145,11 @@ consul {
 EOF
 
 # Start Consul
-consul agent -dev -bind=$IP -client=0.0.0.0 &
-
-# Wait for Consul
-sleep 5
-
 # Start Nomad
 nomad agent -config=/etc/nomad.d/ &
 
 echo "=== Setup complete for $NODE_NAME ==="
 echo "Nomad UI: http://$IP:4646"
-echo "CSI endpoint: $IP:9201"
+echo "CSI endpoint (gossip): $IP:9200"
+echo "CSI gRPC socket: unix:///csi/csi.sock"
+echo "NOTE: Start CSI driver via Nomad CSI plugin job, not manually."

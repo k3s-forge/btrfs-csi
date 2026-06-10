@@ -1,16 +1,19 @@
 use anyhow::{anyhow, Result};
 use btrfs_protocol::message::{
     ConflictInfo, DeleteVolumeRequest, EpochInfo, HeartbeatPayload, Message, MessageType,
-    NodeInfo, QuorumVoteRequest, QuorumVoteResponse,
+    NodeInfo, QuorumVoteRequest, QuorumVoteResponse, VolumeUnpublishRequest,
 };
 use btrfs_protocol::transport::TcpTransport;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 use tracing::{debug, error, info, warn};
 
 use crate::config::ExchangeConfig;
+
+const MAX_CONCURRENT_CONNECTIONS: usize = 512;
+const RECV_TIMEOUT_SECS: u64 = 30;
 
 /// Callback type for node failure events
 pub type NodeFailureCallback = Arc<dyn Fn(String) + Send + Sync>;
@@ -174,7 +177,13 @@ impl GossipService {
 
         info!("Gossip listener ready on {}", addr);
 
+        let connection_semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+
         loop {
+            // Acquire permit before accepting to limit concurrent connections
+            let permit = connection_semaphore.clone().acquire_owned().await;
+            let Ok(permit) = permit else { return };
+
             match transport.accept(&listener).await {
                 Ok(mut conn) => {
                     let config = config.clone();
@@ -189,9 +198,11 @@ impl GossipService {
                         ).await {
                             debug!("Gossip message handler error: {}", e);
                         }
+                        drop(permit);
                     });
                 }
                 Err(e) => {
+                    drop(permit);
                     warn!("Failed to accept gossip connection: {}", e);
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 }
@@ -345,6 +356,19 @@ impl GossipService {
                 // Send acknowledgment
                 let ack = Message::new(MessageType::DeleteVolumeAck, vec![]);
                 let _ = conn.send_message(&ack).await;
+            }
+            MessageType::VolumeUnpublish => {
+                let unpublish_req: VolumeUnpublishRequest =
+                    serde_json::from_slice(&msg.payload)?;
+                info!(
+                    "Received volume unpublish notification: volume={}, node={}",
+                    unpublish_req.volume_id, unpublish_req.node_id
+                );
+                // Remove the node from published list for this volume
+                // (The volume remains; only the node's publication is removed)
+                let _ = conn
+                    .send_message(&Message::new(MessageType::VolumeUnpublishAck, vec![]))
+                    .await;
             }
             _ => {
                 debug!("Unexpected gossip message type: {:?}", msg.msg_type);
@@ -667,6 +691,11 @@ impl GossipService {
     /// Notify peers that a volume is being unpublished from this node (migration)
     pub async fn notify_volume_unpublish(&self, volume_id: &str, node_id: &str) {
         info!("Notifying peers of volume unpublish: volume={}, node={}", volume_id, node_id);
+        let unpublish_req = VolumeUnpublishRequest {
+            volume_id: volume_id.to_string(),
+            node_id: node_id.to_string(),
+        };
+        let payload = serde_json::to_vec(&unpublish_req).unwrap_or_default();
         let peers = self.peers.read().await.clone();
         for (peer_id, peer_info) in &peers {
             if *peer_id == self.config.node_id {
@@ -674,7 +703,7 @@ impl GossipService {
             }
             if let Ok(addr) = peer_info.addr.parse::<SocketAddr>() {
                 if let Ok(mut conn) = self.transport.connect(addr).await {
-                    let msg = Message::new(MessageType::NodeLeave, format!("unpublish:{}:{}", volume_id, node_id).into_bytes());
+                    let msg = Message::new(MessageType::VolumeUnpublish, payload.clone());
                     let _ = conn.send_message(&msg).await;
                 }
             }

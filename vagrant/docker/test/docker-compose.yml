@@ -7,7 +7,15 @@ services:
       dockerfile: docker/test/Dockerfile.node
     container_name: btrfs-node1
     hostname: node1
-    privileged: true
+    cap_add:
+      - SYS_ADMIN
+      - SYS_NICE
+    devices:
+      - /dev/loop-control
+      - /dev/loop0:/dev/loop0
+      - /dev/loop1:/dev/loop1
+      - /dev/loop2:/dev/loop2
+      - /dev/loop3:/dev/loop3
     networks:
       btrfs-net:
         ipv4_address: 172.20.0.11
@@ -31,7 +39,15 @@ services:
       dockerfile: docker/test/Dockerfile.node
     container_name: btrfs-node2
     hostname: node2
-    privileged: true
+    cap_add:
+      - SYS_ADMIN
+      - SYS_NICE
+    devices:
+      - /dev/loop-control
+      - /dev/loop0:/dev/loop0
+      - /dev/loop1:/dev/loop1
+      - /dev/loop2:/dev/loop2
+      - /dev/loop3:/dev/loop3
     networks:
       btrfs-net:
         ipv4_address: 172.20.0.12
@@ -52,7 +68,15 @@ services:
       dockerfile: docker/test/Dockerfile.node
     container_name: btrfs-node3
     hostname: node3
-    privileged: true
+    cap_add:
+      - SYS_ADMIN
+      - SYS_NICE
+    devices:
+      - /dev/loop-control
+      - /dev/loop0:/dev/loop0
+      - /dev/loop1:/dev/loop1
+      - /dev/loop2:/dev/loop2
+      - /dev/loop3:/dev/loop3
     networks:
       btrfs-net:
         ipv4_address: 172.20.0.13

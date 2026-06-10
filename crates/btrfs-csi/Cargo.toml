@@ -8,6 +8,10 @@ edition.workspace = true
 name = "btrfs-csi"
 path = "src/main.rs"
 
+[[bin]]
+name = "csi-test-client"
+path = "src/bin/csi-test-client.rs"
+
 [dependencies]
 btrfs-protocol.workspace = true
 btrfs-ops.workspace = true
@@ -26,6 +30,8 @@ toml.workspace = true
 tonic.workspace = true
 prost.workspace = true
 tokio-stream.workspace = true
+hyper-util.workspace = true
+tower.workspace = true
 
 # ID generation
 uuid.workspace = true

@@ -1,0 +1,164 @@
+name: CSI gRPC End-to-End Test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/btrfs-csi/**'
+      - 'crates/btrfs-ops/**'
+      - 'proto/csi.proto'
+      - '.github/workflows/csi-grpc-test.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crates/btrfs-csi/**'
+      - 'crates/btrfs-ops/**'
+      - 'proto/csi.proto'
+      - '.github/workflows/csi-grpc-test.yml'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  csi-grpc-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y btrfs-progs protobuf-compiler attr
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@888aee3d034b6e106a4584a43fb42cd4810e74e0 # stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: csi-grpc-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build CSI driver and test client
+        run: |
+          cargo build --release --bin btrfs-csi --bin csi-test-client
+          echo "=== Binaries ==="
+          ls -lh target/release/btrfs-csi target/release/csi-test-client
+
+      - name: Create btrfs test filesystem
+        run: |
+          sudo truncate -s 5G /tmp/btrfs-csi.img
+          sudo mkfs.btrfs -f -d single -m dup /tmp/btrfs-csi.img
+          sudo mkdir -p /mnt/btrfs/data /mnt/btrfs/snapshots
+          sudo mount -o loop /tmp/btrfs-csi.img /mnt/btrfs/data
+          sudo mkdir -p /mnt/btrfs/data/volumes
+          sudo btrfs filesystem show /mnt/btrfs/data
+          df -h /mnt/btrfs/data
+
+      - name: Generate config and start CSI driver
+        run: |
+          AUTH_KEY=$(openssl rand -hex 32)
+          cat > /tmp/csi-config.toml <<CONFEOF
+          node_id = "test-node-1"
+          listen_addr = "0.0.0.0"
+          listen_port = 9200
+          zone = "dc1"
+          auth_key = "${AUTH_KEY}"
+          seed_nodes = []
+          gossip_interval = 10
+          heartbeat_interval = 30
+          node_timeout = 90
+
+          [replication]
+          default_replica_count = 1
+          default_interval = 30
+          max_concurrent = 4
+          data_dir = "/mnt/btrfs/data/volumes"
+          snapshot_dir = "/mnt/btrfs/snapshots"
+          enable_incremental = true
+
+          [replication.database]
+          enabled = false
+          sqlite_wal_mode = true
+          checkpoint_interval = 30
+          enable_nocow = false
+
+          [maintenance]
+          enabled = false
+          balance_schedule = "0 2 * * *"
+          balance_threshold = 0.7
+          scrub_schedule = "0 3 * * 0"
+          snapshot_cleanup_schedule = "0 4 * * *"
+
+          [maintenance.snapshot_retention]
+          daily = 7
+          weekly = 4
+          monthly = 3
+          CONFEOF
+
+          mkdir -p /tmp/csi-socket
+          echo "Starting CSI driver (needs sudo for mount operations)..."
+          sudo -E target/release/btrfs-csi \
+            --config /tmp/csi-config.toml \
+            --endpoint unix:///tmp/csi-socket/csi.sock \
+            --log-level info \
+            > /tmp/csi.log 2>&1 &
+          CSI_PID=$!
+          echo "CSI PID: $CSI_PID"
+
+          for i in $(seq 1 30); do
+            sleep 1
+            if [ -S /tmp/csi-socket/csi.sock ]; then
+              echo "CSI socket ready (attempt $i)"
+              break
+            fi
+            if ! kill -0 $CSI_PID 2>/dev/null; then
+              echo "=== CSI DRIVER CRASHED ==="
+              cat /tmp/csi.log
+              exit 1
+            fi
+            echo "  Waiting for socket... ($i)"
+          done
+
+          if [ ! -S /tmp/csi-socket/csi.sock ]; then
+            echo "=== CSI SOCKET NEVER APPEARED ==="
+            cat /tmp/csi.log
+            exit 1
+          fi
+
+          echo "CSI driver is running"
+
+      - name: Run CSI gRPC tests
+        run: |
+          # Fix socket permissions so test client can connect
+          sudo chmod 666 /tmp/csi-socket/csi.sock
+          echo "=== Running CSI gRPC test client ==="
+          target/release/csi-test-client /tmp/csi-socket/csi.sock
+
+      - name: CSI driver logs
+        if: always()
+        run: |
+          echo "=== CSI Driver Logs ==="
+          tail -100 /tmp/csi.log 2>/dev/null || echo "No logs"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          sudo pkill -f "btrfs-csi" 2>/dev/null || true
+          sleep 2
+          sudo btrfs subvolume list /mnt/btrfs/data/volumes 2>/dev/null | awk '{print $NF}' | while read sv; do
+            sudo btrfs subvolume delete "/mnt/btrfs/data/volumes/$sv" 2>/dev/null || true
+          done
+          sudo btrfs subvolume list /mnt/btrfs/snapshots 2>/dev/null | awk '{print $NF}' | while read sv; do
+            sudo btrfs subvolume delete "/mnt/btrfs/snapshots/$sv" 2>/dev/null || true
+          done
+          sudo umount /mnt/btrfs/data 2>/dev/null || true
+          sudo rm -f /tmp/btrfs-csi.img /tmp/csi-config.toml /tmp/csi.log
+          sudo rm -rf /tmp/csi-socket
+          echo "Cleanup complete"

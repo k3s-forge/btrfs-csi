@@ -17,9 +17,9 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y btrfs-progs protobuf-compiler jq attr
       - name: Install Nomad
-        uses: hashicorp/setup-nomad@main
+        uses: hashicorp/setup-nomad@ca731f0157d0e00b6e69b8e06e262f9a7a118643 # v2.0.0
         with:
-          version: "1.8.0"
+          version: "1.8.1"
       - name: Build CSI driver
         run: cargo build --release
       - name: Setup btrfs filesystems
@@ -34,7 +34,43 @@ jobs:
           sudo mount -o loop /tmp/btrfs-replica.img /mnt/btrfs/replica-data
           df -h /mnt/btrfs/data /mnt/btrfs/replica-data
       - name: Write entrypoint script
-        run: echo 'IyEvYmluL2Jhc2gKc2V0IC1lCk5PREVfTkFNRT0iJHtOT01BRF9NRVRBX05PREVfTkFNRTotdW5rbm93bn0iCkNTSV9FTkRQT0lOVD0iJHtDU0lfRU5EUE9JTlQ6LXVuaXg6Ly8vdmFyL3RtcC9jc2kvY3NpLnNvY2t9IgpEQVRBX0RJUj0iJHtOT01BRF9NRVRBX0RBVEFfRElSOi0vbW50L2J0cmZzL2RhdGF9IgpTTkFQX0RJUj0iJHtOT01BRF9NRVRBX1NOQVBfRElSOi0vbW50L2J0cmZzL3NuYXBzaG90c30iCm1rZGlyIC1wIC92YXIvdG1wL2NzaQpjYXQgPiAvdG1wL2J0cmZzLWNzaS1jb25maWctJHtOT0RFX05BTUV9LnRvbWwgPDwgQ09ORkVPRgpub2RlX2lkID0gIiR7Tk9ERV9OQU1FfSIKem9uZSA9ICJkYzEiCmF1dGhfa2V5ID0gInRlc3Qta2V5LWZvci1ub21hZC1jc2ktdGVzdGluZy0yMDI2IgpzZWVkX25vZGVzID0gW10KZ29zc2lwX2ludGVydmFsID0gMTAKaGVhcnRiZWF0X2ludGVydmFsID0gMzAKbm9kZV90aW1lb3V0ID0gOTAKW3JlcGxpY2F0aW9uXQpkZWZhdWx0X3JlcGxpY2FfY291bnQgPSAxCmRlZmF1bHRfaW50ZXJ2YWwgPSAzMAptYXhfY29uY3VycmVudCA9IDQKZGF0YV9kaXIgPSAiJHtEQVRBX0RJUn0iCnNuYXBzaG90X2RpciA9ICIke1NOQVBfRElSfSIKZW5hYmxlX2luY3JlbWVudGFsID0gdHJ1ZQpbbWFpbnRlbmFuY2VdCmVuYWJsZWQgPSBmYWxzZQpDT05GRU9GCmV4ZWMgL2hvbWUvcnVubmVyL3dvcmsvYnRyZnMtY3NpL2J0cmZzLWNzaS90YXJnZXQvcmVsZWFzZS9idHJmcy1jc2kgXAogIC0tY29uZmlnIC90bXAvYnRyZnMtY3NpLWNvbmZpZy0ke05PREVfTkFNRX0udG9tbCBcCiAgLS1lbmRwb2ludCAiJHtDU0lfRU5EUE9JTlR9IiBcCiAgLS1ub2RlLWlkICIke05PREVfTkFNRX0iIFwKICAtbG9nLWxldmVsIGRlYnVn' | base64 -d | sudo tee /usr/local/bin/btrfs-csi-entrypoint.sh > /dev/null && sudo chmod +x /usr/local/bin/btrfs-csi-entrypoint.sh
+        run: |
+          sudo tee /usr/local/bin/btrfs-csi-entrypoint.sh <<'SCRIPTEOF' > /dev/null
+          #!/bin/bash
+          set -e
+          NODE_NAME="${NOMAD_META_NODE_NAME:-unknown}"
+          CSI_ENDPOINT="${CSI_ENDPOINT:-unix:///var/tmp/csi/csi.sock}"
+          DATA_DIR="${NOMAD_META_DATA_DIR:-/mnt/btrfs/data}"
+          SNAP_DIR="${NOMAD_META_SNAP_DIR:-/mnt/btrfs/snapshots}"
+          mkdir -p /var/tmp/csi
+          AUTH_KEY=$(openssl rand -hex 32)
+          cat > "/tmp/btrfs-csi-config-${NODE_NAME}.toml" <<CONFEOF
+          node_id = "${NODE_NAME}"
+          zone = "dc1"
+          auth_key = "${AUTH_KEY}"
+          seed_nodes = []
+          gossip_interval = 10
+          heartbeat_interval = 30
+          node_timeout = 90
+
+          [replication]
+          default_replica_count = 1
+          default_interval = 30
+          max_concurrent = 4
+          data_dir = "${DATA_DIR}"
+          snapshot_dir = "${SNAP_DIR}"
+          enable_incremental = true
+
+          [maintenance]
+          enabled = false
+          CONFEOF
+          exec /home/runner/work/btrfs-csi/btrfs-csi/target/release/btrfs-csi \
+            --config "/tmp/btrfs-csi-config-${NODE_NAME}.toml" \
+            --endpoint "${CSI_ENDPOINT}" \
+            --node-id "${NODE_NAME}" \
+            --log-level debug
+          SCRIPTEOF
+          sudo chmod +x /usr/local/bin/btrfs-csi-entrypoint.sh
       - name: Start Nomad server
         run: |
           mkdir -p /tmp/nomad/server/data
@@ -87,7 +123,7 @@ jobs:
             '    snap_dir = "/mnt/btrfs/snapshots"' \
             '  }' \
             '}' \
-            'plugin "raw_exec" { config { enabled = true } }' \
+            'plugin "exec" { config { enabled = true } }' \
             'ports {' \
             '  http = 24646' \
             '  rpc = 24647' \
@@ -109,7 +145,29 @@ jobs:
           cat /tmp/nomad-client.log || echo "No client log"
       - name: Deploy CSI plugin
         run: |
-          echo 'am9iICJidHJmcy1jc2kiIHsKICB0eXBlID0gInN5c3RlbSIKICBkYXRhY2VudGVycyA9IFsiZGMxIl0KICBncm91cCAibm9kZXMiIHsKICAgIHRhc2sgInBsdWdpbiIgewogICAgICBkcml2ZXIgPSAicmF3X2V4ZWMiCiAgICAgIGNvbmZpZyB7IGNvbW1hbmQgPSAiL3Vzci9sb2NhbC9iaW4vYnRyZnMtY3NpLWVudHJ5cG9pbnQuc2giIH0KICAgICAgY3NpX3BsdWdpbiB7CiAgICAgICAgaWQgPSAiYnRyZnMtY3NpIgogICAgICAgIHR5cGUgPSAibW9ub2xpdGgiCiAgICAgICAgbW91bnRfZGlyID0gIi92YXIvdG1wL2NzaSIKICAgICAgICBoZWFsdGhfdGltZW91dCA9ICIxMjBzIgogICAgICB9CiAgICAgIHJlc291cmNlcyB7CiAgICAgICAgY3B1ID0gNTAwCiAgICAgICAgbWVtb3J5ID0gMjU2CiAgICAgIH0KICAgIH0KICB9Cn0=' | base64 -d | sudo tee /tmp/csi-plugin.nomad > /dev/null && NOMAD_ADDR=http://127.0.0.1:14646 nomad job run /tmp/csi-plugin.nomad
+          cat > /tmp/csi-plugin.nomad <<'NOMADEOF'
+          job "btrfs-csi" {
+            type = "system"
+            datacenters = ["dc1"]
+            group "nodes" {
+              task "plugin" {
+                driver = "exec"
+                config { command = "/usr/local/bin/btrfs-csi-entrypoint.sh" }
+                csi_plugin {
+                  id = "btrfs-csi"
+                  type = "monolith"
+                  mount_dir = "/var/tmp/csi"
+                  health_timeout = "120s"
+                }
+                resources {
+                  cpu = 500
+                  memory = 256
+                }
+              }
+            }
+          }
+          NOMADEOF
+          NOMAD_ADDR=http://127.0.0.1:14646 nomad job run /tmp/csi-plugin.nomad
            for i in $(seq 1 60); do
              sleep 5
              PLUGIN_OK=$(NOMAD_ADDR=http://127.0.0.1:14646 nomad plugin status btrfs-csi 2>/dev/null || true)
@@ -156,7 +214,7 @@ jobs:
             '      access_mode = "single-node-writer"' \
             '    }' \
             '    task "write" {' \
-            '      driver = "raw_exec"' \
+            '      driver = "exec"' \
             '      config { command = "/bin/bash"; args = ["-c", "echo HELLO_NOMAD_CSI > /data/hello.txt; sync; cat /data/hello.txt"] }' \
             '      volume_mount { volume = "data"; destination = "/data" }' \
             '      resources {' \
@@ -192,7 +250,7 @@ jobs:
             '      access_mode = "single-node-writer"' \
             '    }' \
             '    task "read" {' \
-            '      driver = "raw_exec"' \
+            '      driver = "exec"' \
             '      config { command = "/bin/bash"; args = ["-c", "cat /data/hello.txt"] }' \
             '      volume_mount { volume = "data"; destination = "/data" }' \
             '      resources {' \

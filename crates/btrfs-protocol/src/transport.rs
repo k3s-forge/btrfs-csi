@@ -8,6 +8,8 @@ use tracing::info;
 use crate::auth::HmacAuth;
 use crate::message::{Message, MessageType};
 
+const RECV_TIMEOUT_SECS: u64 = 120;
+
 /// Errors that can occur during transport operations
 #[derive(Debug, Error)]
 pub enum TransportError {
@@ -311,11 +313,13 @@ impl TransportConnection {
                 });
             }
 
-            let n = self
-                .stream
-                .read_buf(&mut self.read_buf)
-                .await
-                .map_err(TransportError::Io)?;
+            let n = tokio::time::timeout(
+                tokio::time::Duration::from_secs(RECV_TIMEOUT_SECS),
+                self.stream.read_buf(&mut self.read_buf),
+            )
+            .await
+            .map_err(|_| TransportError::Protocol("Receive timed out".to_string()))?
+            .map_err(TransportError::Io)?;
 
             if n == 0 {
                 return Err(TransportError::ConnectionClosed);

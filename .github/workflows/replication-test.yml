@@ -56,13 +56,14 @@ jobs:
 
       - name: Write receiver config
         run: |
+          AUTH_KEY=$(openssl rand -hex 32)
           printf '%s\n' \
             'node_id = "receiver-node"' \
             'listen_addr = "127.0.0.1"' \
             'listen_port = 9201' \
             'replication_port = 9301' \
             'zone = "test"' \
-            'auth_key = "5658a88afed33f2c9cc5e4212885b73cbd41e29f705a3d05376b6acab73bf17b"' \
+            "auth_key = \"${AUTH_KEY}\"" \
             'seed_nodes = []' \
             'gossip_interval = 10' \
             'heartbeat_interval = 30' \
@@ -94,13 +95,14 @@ jobs:
 
       - name: Write sender config
         run: |
+          AUTH_KEY=$(openssl rand -hex 32)
           printf '%s\n' \
             'node_id = "sender-node"' \
             'listen_addr = "127.0.0.1"' \
             'listen_port = 9200' \
             'replication_port = 9300' \
             'zone = "test"' \
-            'auth_key = "5658a88afed33f2c9cc5e4212885b73cbd41e29f705a3d05376b6acab73bf17b"' \
+            "auth_key = \"${AUTH_KEY}\"" \
             'seed_nodes = ["127.0.0.1:9201"]' \
             'gossip_interval = 10' \
             'heartbeat_interval = 30' \

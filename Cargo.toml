@@ -63,6 +63,7 @@ uuid = { version = "1", features = ["v4"] }
 tonic = "0.12"
 prost = "0.13"
 tonic-build = "0.12"
+hyper-util = { version = "0.1", features = ["tokio"] }
 
 # Metrics
 prometheus = "0.13"
@@ -72,6 +73,9 @@ async-trait = "0.1"
 
 # Futures
 futures = "0.3"
+
+# Tower (for tonic transport customization)
+tower = "0.4"
 
 # Tokio streams (for gRPC streaming)
 tokio-stream = { version = "0.1", features = ["net", "fs"] }

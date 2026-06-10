@@ -47,7 +47,7 @@ job "btrfs-csi" {
         command = "/usr/local/bin/btrfs-csi"
         args = [
           "--config", "/etc/btrfs-csi/config.toml",
-          "--endpoint", "0.0.0.0:9201",
+          "--endpoint", "unix:///csi/csi.sock",
         ]
       }
 
@@ -77,14 +77,20 @@ job "btrfs-csi" {
 
       service {
         name = "btrfs-csi"
-        port = "csi"
+        port = "transport"
 
         check {
           type = "tcp"
-          port = "csi"
+          port = "transport"
           interval = "10s"
           timeout = "2s"
         }
+      }
+
+      csi_plugin {
+        id        = "btrfs-csi"
+        type      = "monolith"
+        mount_dir = "/csi"
       }
 
       resources {

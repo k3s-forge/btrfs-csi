@@ -4,9 +4,13 @@ use btrfs_protocol::transport::{TcpTransport, TransportConnection};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
+use tokio::time::timeout;
 use tracing::{error, info, warn};
 
 use crate::config::ExchangeConfig;
+
+const RECEIVE_BUFFER_LIMIT: u64 = 512 * 1024 * 1024; // 512 MB
+const RECEIVE_WRITE_TIMEOUT_SECS: u64 = 30;
 
 /// Replication receiver: accepts incoming btrfs send streams
 pub struct ReplicationReceiver {
@@ -104,9 +108,43 @@ impl ReplicationReceiver {
             match conn.recv_message().await {
                 Ok(msg) => match msg.msg_type {
                     MessageType::SendData => {
-                        hasher.update(&msg.payload);
-                        stdin_writer.write_all(&msg.payload).await?;
                         total_bytes += msg.payload.len() as u64;
+                        if total_bytes > RECEIVE_BUFFER_LIMIT {
+                            error!(
+                                "Receive buffer limit exceeded for {}: {} bytes (max {})",
+                                start_req.volume_id, total_bytes, RECEIVE_BUFFER_LIMIT
+                            );
+                            drop(stdin_writer);
+                            let _ = child.kill().await;
+                            let _ = child.wait().await;
+                            return Err(anyhow::anyhow!(
+                                "Receive buffer limit exceeded ({} > {})",
+                                total_bytes, RECEIVE_BUFFER_LIMIT
+                            ));
+                        }
+                        hasher.update(&msg.payload);
+                        match timeout(
+                            tokio::time::Duration::from_secs(RECEIVE_WRITE_TIMEOUT_SECS),
+                            stdin_writer.write_all(&msg.payload),
+                        )
+                        .await
+                        {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => {
+                                error!("Write to btrfs receive pipe failed: {}", e);
+                                drop(stdin_writer);
+                                let _ = child.kill().await;
+                                let _ = child.wait().await;
+                                return Err(anyhow::anyhow!("Write to btrfs receive pipe failed: {}", e));
+                            }
+                            Err(_) => {
+                                error!("Write to btrfs receive pipe timed out");
+                                drop(stdin_writer);
+                                let _ = child.kill().await;
+                                let _ = child.wait().await;
+                                return Err(anyhow::anyhow!("Write to btrfs receive pipe timed out"));
+                            }
+                        }
                         chunk_count += 1;
 
                         if chunk_count % 100 == 0 {

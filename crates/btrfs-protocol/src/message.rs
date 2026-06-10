@@ -8,6 +8,9 @@ const MAGIC: [u8; 4] = [0x42, 0x54, 0x52, 0x46];
 /// Current protocol version
 const PROTOCOL_VERSION: u16 = 1;
 
+/// Maximum payload size (64 MB) to prevent memory exhaustion
+const MAX_PAYLOAD_SIZE: usize = 64 * 1024 * 1024;
+
 /// Message type identifiers
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +55,10 @@ pub enum MessageType {
     QuorumVote = 0x0600,
     QuorumVoteResponse = 0x0601,
     ConflictDetected = 0x0602,
+
+    // Volume management
+    VolumeUnpublish = 0x0700,
+    VolumeUnpublishAck = 0x0701,
 }
 
 /// Network message format
@@ -125,6 +132,17 @@ impl Message {
             buf[12], buf[13], buf[14], buf[15], buf[16], buf[17], buf[18], buf[19],
         ]);
 
+        // Reject oversized payloads to prevent memory exhaustion
+        if payload_len > MAX_PAYLOAD_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Payload too large: {} bytes (max {})",
+                    payload_len, MAX_PAYLOAD_SIZE
+                ),
+            ));
+        }
+
         // Check if we have the full message
         if buf.len() < 20 + payload_len {
             return Ok(None);
@@ -162,6 +180,8 @@ impl Message {
             0x0600 => MessageType::QuorumVote,
             0x0601 => MessageType::QuorumVoteResponse,
             0x0602 => MessageType::ConflictDetected,
+            0x0700 => MessageType::VolumeUnpublish,
+            0x0701 => MessageType::VolumeUnpublishAck,
             _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "Unknown message type")),
         };
 
@@ -242,6 +262,14 @@ pub struct SendCompleteResponse {
     pub success: bool,
     pub error: Option<String>,
     pub checksum: Option<String>,
+}
+
+// Volume Unpublish
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VolumeUnpublishRequest {
+    pub volume_id: String,
+    pub node_id: String,
 }
 
 // Quorum lease message types

@@ -16,6 +16,7 @@ jobs:
   # Job 1: Document local testing
   local-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     if: github.event.inputs.test_type == 'local'
     steps:
     - uses: actions/checkout@v4
@@ -54,6 +55,7 @@ jobs:
   # Job 2: Docker-based cluster test
   docker-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     if: github.event.inputs.test_type == 'docker'
     steps:
     - uses: actions/checkout@v4
