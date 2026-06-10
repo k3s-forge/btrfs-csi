@@ -36,11 +36,10 @@ struct PayloadCipher {
 }
 
 impl PayloadCipher {
-    fn new(auth_key: &[u8]) -> Self {
-        use sha2::Digest;
-        let hash = sha2::Sha256::digest(auth_key);
+    fn new(raw_key: &[u8]) -> Self {
         use chacha20poly1305::aead::KeyInit;
-        let key = chacha20poly1305::Key::<chacha20poly1305::XChaCha20Poly1305>::from_slice(&hash);
+        // auth_key is already 32 raw bytes, use directly as XChaCha20 key
+        let key = chacha20poly1305::Key::<chacha20poly1305::XChaCha20Poly1305>::from_slice(raw_key);
         Self { cipher: chacha20poly1305::XChaCha20Poly1305::new(key) }
     }
 
@@ -66,18 +65,25 @@ impl PayloadCipher {
     }
 }
 
-/// TCP transport with HMAC authentication and AES-256-GCM payload encryption
+/// TCP transport with HMAC authentication and XChaCha20-Poly1305 payload encryption
 pub struct TcpTransport {
     auth: HmacAuth,
     auth_key: Vec<u8>,
 }
 
 impl TcpTransport {
-    /// Create a new transport with the given authentication key
+    /// Create a new transport with the given authentication key (hex string or raw 32 bytes)
     pub fn new(key: &[u8]) -> Self {
+        // auth_key is typically a 64-char hex string from `openssl rand -hex 32`
+        // Decode to 32 raw bytes for both HMAC auth and XChaCha20 cipher
+        let raw_key = if key.len() == 64 {
+            hex::decode(key).unwrap_or_else(|_| key.to_vec())
+        } else {
+            key.to_vec()
+        };
         Self {
-            auth: HmacAuth::new(key, 30),
-            auth_key: key.to_vec(),
+            auth: HmacAuth::new(&raw_key, 30),
+            auth_key: raw_key,
         }
     }
 
