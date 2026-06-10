@@ -149,9 +149,11 @@ impl Node for CsiNode {
         let inode_output = tokio::process::Command::new("df")
             .args(["-i", &self.data_dir])
             .output()
-            .await
-            .unwrap_or_else(|_| std::process::Output::default());
-        let (total_inodes, used_inodes) = parse_inode_usage(&String::from_utf8_lossy(&inode_output.stdout));
+            .await;
+        let (total_inodes, used_inodes) = match inode_output {
+            Ok(o) if o.status.success() => parse_inode_usage(&String::from_utf8_lossy(&o.stdout)),
+            _ => (0u64, 0u64),
+        };
 
         Ok(Response::new(NodeGetVolumeStatsResponse {
             usage: Some(ngvsr::VolumeUsage {
