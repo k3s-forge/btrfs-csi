@@ -34,7 +34,7 @@ jobs:
           sudo apt-get install -y btrfs-progs protobuf-compiler attr
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@888aee3d034b6e106a4584a43fb42cd4810e74e0 # stable
 
       - name: Cache cargo registry
         uses: actions/cache@v4
