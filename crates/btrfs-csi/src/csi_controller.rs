@@ -216,7 +216,7 @@ impl Controller for CsiController {
             .await;
 
         // Set qgroup limit via subvolume ID
-        if let Ok(subvol_id) = get_subvolume_id(&subvol_path).await {
+        if let Some(subvol_id) = get_subvolume_id(&subvol_path).await {
             let _ = tokio::process::Command::new("btrfs")
                 .args(["qgroup", "limit", &capacity.to_string(), &subvol_path])
                 .output()

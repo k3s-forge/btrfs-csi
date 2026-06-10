@@ -391,7 +391,7 @@ pub fn set_io_priority_idle() -> std::result::Result<(), String> {
 
     unsafe {
         let ioprio = (IOPRIO_CLASS_IDLE as u64) << 13;
-        let ret = libc::syscall(libc::SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0, ioprio);
+        let ret = libc::syscall(libc::SYS_ioprio_set, IOPRIO_WHO_PROCESS as libc::c_int, 0, ioprio);
         if ret < 0 {
             let err = std::io::Error::last_os_error();
             return Err(format!("ioprio_set failed: {}", err));
