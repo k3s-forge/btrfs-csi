@@ -45,8 +45,7 @@ fn detect_hardware_aes() -> bool {
     {
         let cpuid = raw_cpuid::CpuId::new();
         if let Some(features) = cpuid.get_feature_info() {
-                return features.has_aesni();
-            }
+            return features.has_aesni();
         }
         false
     }
