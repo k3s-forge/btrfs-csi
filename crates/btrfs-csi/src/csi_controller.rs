@@ -63,13 +63,18 @@ impl CsiController {
         format!("{}/{}", self.data_dir, name)
     }
 
-    fn get_profile(&self, profile_type: &str) -> Result<&VolumeProfile, Status> {
+    fn get_profile(&self, profile_type: &str) -> Result<VolumeProfile, Status> {
         self.volume_profiles
             .get(profile_type)
             .or_else(|| self.volume_profiles.get("default"))
-            .ok_or_else(|| Status::internal(format!(
-                "No volume profile found for '{}' and no default profile configured", profile_type
-            )))
+            .cloned()
+            .or_else(|| {
+                // Built-in fallback default when no profiles configured
+                Some(VolumeProfile::default())
+            })
+            .ok_or_else(|| Status::internal(
+                "No default volume profile available".to_string()
+            ))
     }
 
     async fn volume_xattr(&self, name: &str, key: &str) -> Option<String> {

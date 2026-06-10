@@ -104,13 +104,11 @@ async fn main() -> Result<()> {
         .await
         .context("GetCapacity failed")?;
     let cap = resp.into_inner();
-    if cap.available_capacity > 0 {
-        println!("  PASS (available={} bytes)", cap.available_capacity);
-    } else {
-        println!(
-            "  WARN (available=0, btrfs usage parser may need tuning for loopback filesystems)"
-        );
-    }
+    assert!(
+        cap.available_capacity > 0,
+        "Available capacity is 0"
+    );
+    println!("  PASS (available={} bytes)", cap.available_capacity);
 
     print_test("ControllerGetCapabilities");
     let resp = controller
