@@ -160,7 +160,11 @@ async fn main() -> Result<()> {
     let vol = resp.into_inner();
     let created_volume = vol.volume.unwrap();
     let volume_id = created_volume.volume_id.clone();
-    let volume_context = created_volume.volume_context.clone();
+    let mut volume_context = created_volume.volume_context.clone();
+    if volume_context.is_empty() {
+        // Fallback: use volume name from create request to build path
+        volume_context.insert("volume_name".to_string(), test_volume_name.clone());
+    }
     assert!(!volume_id.is_empty(), "Volume ID is empty");
     println!(
         "  PASS (volume_id={}, capacity={})",
