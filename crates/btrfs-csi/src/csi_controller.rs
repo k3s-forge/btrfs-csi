@@ -961,15 +961,8 @@ impl Controller for CsiController {
         &self,
         _request: Request<ControllerGetCapabilitiesRequest>,
     ) -> Result<Response<ControllerGetCapabilitiesResponse>, Status> {
-        let cap = controller_get_capabilities_response::controller_capability::Rpc {
-            r#type: controller_get_capabilities_response::controller_capability::rpc::Type::CreateDeleteVolume.into(),
-        };
         Ok(Response::new(ControllerGetCapabilitiesResponse {
-            capabilities: vec![
-                controller_get_capabilities_response::ControllerCapability {
-                    r#type: Some(controller_get_capabilities_response::controller_capability::Type::Rpc(cap)),
-                },
-            ],
+            capabilities: vec![],
         }))
     }
 }
