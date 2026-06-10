@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
-use btrfs_exchange::config::VolumeProfile;
+use btrfs_exchange::config::{ExchangeConfig, VolumeProfile};
 use btrfs_exchange::gossip::GossipService;
 use btrfs_exchange::replicator::Replicator;
 use btrfs_ops::xattr;
@@ -40,6 +40,7 @@ pub struct CsiController {
     node_id: String,
     zone: String,
     data_dir: String,
+    config: ExchangeConfig,
     gossip: Arc<GossipService>,
     replicator: Arc<Replicator>,
     volume_profiles: HashMap<String, VolumeProfile>,
@@ -50,11 +51,12 @@ impl CsiController {
         node_id: String,
         zone: String,
         data_dir: String,
+        config: ExchangeConfig,
         gossip: Arc<GossipService>,
         replicator: Arc<Replicator>,
         volume_profiles: HashMap<String, VolumeProfile>,
     ) -> Self {
-        Self { node_id, zone, data_dir, gossip, replicator, volume_profiles }
+        Self { node_id, zone, data_dir, config, gossip, replicator, volume_profiles }
     }
 
     fn subvol_path(&self, name: &str) -> String {
@@ -232,6 +234,16 @@ impl Controller for CsiController {
         self.set_vol_xattr(&req.name, "zone", &self.zone).await;
         self.set_vol_xattr(&req.name, "profile", &profile_type).await;
         self.set_vol_xattr(&req.name, "created_at", &now).await;
+
+        // Read replica_count from parameters (default to config default if not specified)
+        let replica_count = req.parameters
+            .get("replica_count")
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(self.config.replication.default_replica_count);
+        
+        // Store replica_count as xattr for per-volume replication policy
+        xattr::set_replica_count(&subvol_path, replica_count).await.ok();
+        info!("Volume {} replica_count = {}", req.name, replica_count);
 
         // Initialize epoch/vector clock for quorum tracking
         let initial_clock = [(self.node_id.clone(), 1u64)];

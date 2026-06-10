@@ -5,7 +5,7 @@ use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
 
-use btrfs_exchange::config::VolumeProfile;
+use btrfs_exchange::config::{ExchangeConfig, VolumeProfile};
 use btrfs_exchange::gossip::GossipService;
 use btrfs_exchange::replicator::Replicator;
 
@@ -29,6 +29,7 @@ impl CsiGrpcServer {
         node_id: String,
         zone: String,
         data_dir: String,
+        config: ExchangeConfig,
         gossip: Arc<GossipService>,
         replicator: Arc<Replicator>,
         volume_profiles: HashMap<String, VolumeProfile>,
@@ -36,7 +37,7 @@ impl CsiGrpcServer {
         Self {
             endpoint,
             identity: CsiIdentity::new(node_id.clone()),
-            controller: CsiController::new(node_id.clone(), zone.clone(), data_dir.clone(), gossip, replicator, volume_profiles),
+            controller: CsiController::new(node_id.clone(), zone.clone(), data_dir.clone(), config, gossip, replicator, volume_profiles),
             node: CsiNode::new(node_id, zone, data_dir),
         }
     }

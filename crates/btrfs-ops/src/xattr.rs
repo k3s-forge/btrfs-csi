@@ -8,6 +8,7 @@ pub const XATTR_EPOCH: &str = "epoch";
 pub const XATTR_VECTOR_CLOCK: &str = "vector_clock";
 pub const XATTR_LAST_SYNCED_FROM: &str = "last_synced_from";
 pub const XATTR_VOLUME_STATUS: &str = "volume_status";
+pub const XATTR_REPLICA_COUNT: &str = "replica_count";
 
 /// Volume status values
 pub const VOLUME_STATUS_ACTIVE: &str = "active";
@@ -194,4 +195,17 @@ pub fn parse_u64_attr(val: Option<&String>) -> u64 {
 /// Parse i64 from xattr value safely
 pub fn parse_i64_attr(val: Option<&String>) -> i64 {
     val.and_then(|v| v.parse::<i64>().ok()).unwrap_or(0)
+}
+
+/// Get replica count for a volume (0 = no replication)
+pub async fn get_replica_count(path: &str) -> u32 {
+    get_csi_attr(path, XATTR_REPLICA_COUNT).await
+        .ok().flatten()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0)
+}
+
+/// Set replica count on a subvolume
+pub async fn set_replica_count(path: &str, count: u32) -> Result<()> {
+    set_csi_attr(path, XATTR_REPLICA_COUNT, &count.to_string()).await
 }

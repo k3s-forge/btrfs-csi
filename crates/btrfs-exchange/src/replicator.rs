@@ -1,13 +1,14 @@
 use anyhow::{Context, Result};
 use btrfs_ops::snapshot::{Snapshot, SnapshotManager};
 use btrfs_ops::subvolume::SubvolumeManager;
+use btrfs_ops::xattr;
 use btrfs_protocol::message::{Message, MessageType, SendCompleteResponse, SendStartRequest};
 use btrfs_protocol::transport::TcpTransport;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{RwLock, Semaphore};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::config::ExchangeConfig;
 use crate::gossip::GossipService;
@@ -321,7 +322,14 @@ impl Replicator {
             }
         }
 
-        let count = self.config.replication.default_replica_count as usize;
+        // Read per-volume replica_count from xattr (0 = no replication)
+        let subvol_path = format!("{}/{}", self.config.replication.data_dir, volume_id);
+        let count = xattr::get_replica_count(&subvol_path).await as usize;
+        
+        if count == 0 {
+            debug!("Volume {} has replica_count=0, skipping replication", volume_id);
+            return Vec::new();
+        }
 
         self.gossip
             .select_replica_targets(&exclude, count)

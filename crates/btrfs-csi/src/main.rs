@@ -164,6 +164,7 @@ async fn main() -> Result<()> {
         config.node_id.clone(),
         config.zone.clone(),
         config.replication.data_dir.clone(),
+        config.clone(),
         gossip,
         replicator,
         config.replication.volume_profiles.clone(),
