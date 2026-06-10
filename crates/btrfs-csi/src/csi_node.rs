@@ -330,7 +330,6 @@ fn parse_inode_usage(output: &str) -> (u64, u64) {
 /// Apply idmapped mount using mount_setattr syscall (Linux 5.12+)
 fn apply_idmapped_mount(path: &str, uid: u32, gid: u32) -> std::result::Result<(), String> {
     use std::ffi::CString;
-    use std::os::unix::io::AsRawFd;
 
     let cpath = CString::new(path).map_err(|e| format!("Invalid path: {}", e))?;
 
