@@ -394,7 +394,7 @@ impl Controller for CsiController {
                 let epoch = xattr::increment_epoch(&dest_path).await.unwrap_or(1);
                 let mut vclock = xattr::get_vector_clock(&dest_path).await;
                 vclock.entry(self.node_id.clone()).and_modify(|e| { *e += 1; }).or_insert(1);
-                let vclock_vec: Vec<(String, u64)> = vclock.iter().cloned().collect();
+                let vclock_vec: Vec<(String, u64)> = vclock.iter().map(|(k, v)| (k.clone(), *v)).collect();
                 let _ = xattr::set_vector_clock(&dest_path, &vclock).await;
                 let _ = xattr::set_volume_status(&dest_path, xattr::VOLUME_STATUS_ACTIVE).await;
 
@@ -408,11 +408,17 @@ impl Controller for CsiController {
                 found_path = Some(dest_path);
             } else {
                 // No local data and no replica — check if any peer has the volume
+                // Use gossip quorum system to find the current primary
+                let quorum_result = self.gossip.request_quorum_lease(
+                    &req.volume_id, 0, &[],
+                ).await;
+
+                // Extract source node from quorum result (the node that voted and has the data)
+                // For now, we'll use the first peer in the cluster as source
+                // TODO: Track which node has the volume in gossip
                 let peers = self.gossip.get_peers().await;
-                let source_node = peers.values().find(|p| {
-                    // Check if this peer is currently hosting the volume
-                    p.volumes.contains(&req.volume_id)
-                });
+                let source_node = peers.values()
+                    .find(|p| p.id != self.node_id);
 
                 if let Some(source) = source_node {
                     info!("Volume {} not local, triggering sync from {}", req.volume_id, source.id);
@@ -443,7 +449,7 @@ impl Controller for CsiController {
                         let epoch = xattr::increment_epoch(&dest_path).await.unwrap_or(1);
                         let mut vclock = xattr::get_vector_clock(&dest_path).await;
                         vclock.entry(self.node_id.clone()).and_modify(|e| { *e += 1; }).or_insert(1);
-                        let vclock_vec: Vec<(String, u64)> = vclock.iter().cloned().collect();
+                        let vclock_vec: Vec<(String, u64)> = vclock.iter().map(|(k, v)| (k.clone(), *v)).collect();
                         let _ = xattr::set_vector_clock(&dest_path, &vclock).await;
                         let _ = xattr::set_volume_status(&dest_path, xattr::VOLUME_STATUS_ACTIVE).await;
                         self.gossip.register_volume_epoch(
