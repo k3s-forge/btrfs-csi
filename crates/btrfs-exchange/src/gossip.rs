@@ -333,7 +333,6 @@ impl GossipService {
             zone: self.config.zone.clone(),
             role: "replica".to_string(),
             free_space: get_free_space(&self.config.replication.data_dir),
-            volumes: Vec::new(),
         }
     }
 
