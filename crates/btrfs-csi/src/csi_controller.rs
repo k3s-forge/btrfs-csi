@@ -353,6 +353,120 @@ impl Controller for CsiController {
             }
         }
 
+        // If volume not found locally, check for received replica and promote it
+        if found_name.is_none() {
+            let snap_dir = format!("{}/{}", self.config.replication.snapshot_dir, req.volume_id);
+            let snap_exists = tokio::fs::metadata(&snap_dir).await.is_ok();
+
+            if snap_exists {
+                info!("Volume {} not in data_dir but replica found at {}, promoting", req.volume_id, snap_dir);
+                let vol_name = req.volume_id.replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '_', "");
+                let dest_path = self.subvol_path(&vol_name);
+
+                // Create a writable snapshot from the received replica
+                let output = tokio::process::Command::new("btrfs")
+                    .args(["subvolume", "snapshot", &snap_dir, &dest_path])
+                    .output()
+                    .await
+                    .map_err(|e| Status::internal(format!("Failed to promote replica: {}", e)))?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(Status::internal(format!(
+                        "Failed to create writable snapshot from replica: {}", stderr
+                    )));
+                }
+
+                // Copy xattrs from replica snapshot to promoted volume
+                if let Ok(Some(rep_name)) = xattr::get_csi_attr(&snap_dir, "volume_id").await {
+                    // The replica might have a different name; set correct volume_id
+                    let _ = xattr::set_csi_attr(&dest_path, "volume_id", &req.volume_id).await;
+                }
+
+                // Copy key metadata xattrs from replica
+                for attr in &["volume_id", "size", "zone", "profile", "created_at", "replica_count"] {
+                    if let Ok(Some(val)) = xattr::get_csi_attr(&snap_dir, attr).await {
+                        let _ = xattr::set_csi_attr(&dest_path, attr, &val).await;
+                    }
+                }
+
+                // Increment epoch to mark this as a migration event
+                let epoch = xattr::increment_epoch(&dest_path).await.unwrap_or(1);
+                let mut vclock = xattr::get_vector_clock(&dest_path).await;
+                vclock.entry(self.node_id.clone()).and_modify(|e| { *e += 1; }).or_insert(1);
+                let vclock_vec: Vec<(String, u64)> = vclock.iter().cloned().collect();
+                let _ = xattr::set_vector_clock(&dest_path, &vclock).await;
+                let _ = xattr::set_volume_status(&dest_path, xattr::VOLUME_STATUS_ACTIVE).await;
+
+                // Register the promoted volume with gossip quorum
+                self.gossip.register_volume_epoch(
+                    &req.volume_id, epoch, vclock_vec, xattr::VOLUME_STATUS_ACTIVE,
+                ).await;
+
+                info!("Volume {} promoted from replica to primary at {}", req.volume_id, dest_path);
+                found_name = Some(vol_name);
+                found_path = Some(dest_path);
+            } else {
+                // No local data and no replica — check if any peer has the volume
+                let peers = self.gossip.get_peers().await;
+                let source_node = peers.values().find(|p| {
+                    // Check if this peer is currently hosting the volume
+                    p.volumes.contains(&req.volume_id)
+                });
+
+                if let Some(source) = source_node {
+                    info!("Volume {} not local, triggering sync from {}", req.volume_id, source.id);
+                    // Trigger immediate synchronization from the source node
+                    self.replicator.sync_volume_from(&req.volume_id, &source.addr).await
+                        .map_err(|e| Status::internal(format!("Failed to sync volume: {}", e)))?;
+                    
+                    // After sync, the replica should exist at snapshot_dir/volume_id
+                    // Try promoting again
+                    if tokio::fs::metadata(&snap_dir).await.is_ok() {
+                        let vol_name = req.volume_id.replace(|c: char| !c.is_alphanumeric() && c != '-' && c != '_', "");
+                        let dest_path = self.subvol_path(&vol_name);
+                        let output = tokio::process::Command::new("btrfs")
+                            .args(["subvolume", "snapshot", &snap_dir, &dest_path])
+                            .output()
+                            .await
+                            .map_err(|e| Status::internal(format!("Failed to promote synced replica: {}", e)))?;
+
+                        if !output.status.success() {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            return Err(Status::internal(format!(
+                                "Failed to create writable snapshot from synced replica: {}", stderr
+                            )));
+                        }
+
+                        // Set xattrs on the promoted volume
+                        let _ = xattr::set_csi_attr(&dest_path, "volume_id", &req.volume_id).await;
+                        let epoch = xattr::increment_epoch(&dest_path).await.unwrap_or(1);
+                        let mut vclock = xattr::get_vector_clock(&dest_path).await;
+                        vclock.entry(self.node_id.clone()).and_modify(|e| { *e += 1; }).or_insert(1);
+                        let vclock_vec: Vec<(String, u64)> = vclock.iter().cloned().collect();
+                        let _ = xattr::set_vector_clock(&dest_path, &vclock).await;
+                        let _ = xattr::set_volume_status(&dest_path, xattr::VOLUME_STATUS_ACTIVE).await;
+                        self.gossip.register_volume_epoch(
+                            &req.volume_id, epoch, vclock_vec, xattr::VOLUME_STATUS_ACTIVE,
+                        ).await;
+
+                        info!("Volume {} synced and promoted at {}", req.volume_id, dest_path);
+                        found_name = Some(vol_name);
+                        found_path = Some(dest_path);
+                    } else {
+                        return Err(Status::internal(format!(
+                            "Volume {} sync from {} completed but replica not found", 
+                            req.volume_id, source.id
+                        )));
+                    }
+                } else {
+                    return Err(Status::not_found(format!(
+                        "Volume {} not found locally and no peer has it", req.volume_id
+                    )));
+                }
+            }
+        }
+
         let name = found_name.ok_or_else(|| Status::not_found(format!("Volume {} not found", req.volume_id)))?;
         let subvol_path = found_path.unwrap_or_else(|| self.subvol_path(&name));
 
@@ -423,12 +537,27 @@ impl Controller for CsiController {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if let Ok(Some(vid)) = xattr::get_csi_attr(&entry.path().to_string_lossy(), "volume_id").await {
                     if vid == req.volume_id {
+                        // Trigger final sync to ensure all replicas are up-to-date before migration
+                        let replica_count = xattr::get_replica_count(&entry.path().to_string_lossy()).await;
+                        if replica_count > 0 {
+                            info!("Triggering final sync for volume {} before unpublish (replica_count={})",
+                                  req.volume_id, replica_count);
+                            let _ = self.replicator.replicate_volume(&req.volume_id).await;
+                        }
+
                         self.remove_published_node(&name, &req.node_id).await;
+
+                        // Update volume status to indicate migration
+                        let path = entry.path().to_string_lossy().to_string();
+                        let _ = xattr::set_volume_status(&path, xattr::VOLUME_STATUS_ACTIVE).await;
                         break;
                     }
                 }
             }
         }
+
+        // Notify gossip peers that this node is releasing the volume
+        self.gossip.notify_volume_unpublish(&req.volume_id, &req.node_id).await;
 
         Ok(Response::new(ControllerUnpublishVolumeResponse {}))
     }

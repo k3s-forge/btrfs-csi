@@ -635,6 +635,23 @@ impl GossipService {
     pub async fn get_volume_epoch_info(&self, volume_id: &str) -> Option<EpochInfo> {
         self.volume_epochs.read().await.get(volume_id).cloned()
     }
+
+    /// Notify peers that a volume is being unpublished from this node (migration)
+    pub async fn notify_volume_unpublish(&self, volume_id: &str, node_id: &str) {
+        info!("Notifying peers of volume unpublish: volume={}, node={}", volume_id, node_id);
+        let peers = self.peers.read().await.clone();
+        for (peer_id, peer_info) in &peers {
+            if *peer_id == self.config.node_id {
+                continue;
+            }
+            if let Ok(addr) = peer_info.addr.parse::<SocketAddr>() {
+                if let Ok(mut conn) = self.transport.connect(addr).await {
+                    let msg = Message::new(MessageType::NodeLeave, format!("unpublish:{}:{}", volume_id, node_id).into_bytes());
+                    let _ = conn.send_message(&msg).await;
+                }
+            }
+        }
+    }
 }
 
 /// Result of a quorum lease request

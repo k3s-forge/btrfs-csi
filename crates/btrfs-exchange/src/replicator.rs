@@ -7,6 +7,7 @@ use btrfs_protocol::transport::TcpTransport;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{RwLock, Semaphore};
 use tracing::{debug, error, info, warn};
 
@@ -502,6 +503,80 @@ impl Replicator {
     /// Get all replication states
     pub async fn get_all_states(&self) -> HashMap<String, ReplicationState> {
         self.states.read().await.clone()
+    }
+
+    /// Sync a volume from a specific peer node (for migration)
+    pub async fn sync_volume_from(&self, volume_id: &str, peer_addr: &str) -> Result<()> {
+        info!("Syncing volume {} from peer {}", volume_id, peer_addr);
+
+        let addr: SocketAddr = peer_addr.parse().context("Invalid peer address")?;
+        let mut conn = self.transport.connect(addr).await?;
+
+        let start_req = SendStartRequest {
+            volume_id: volume_id.to_string(),
+            snapshot_name: volume_id.to_string(),
+            is_incremental: false,
+            parent_snapshot: None,
+        };
+        let payload = serde_json::to_vec(&start_req)?;
+        let msg = Message::new(MessageType::SendStart, payload);
+        conn.send_message(&msg).await?;
+
+        // Wait for acknowledgment
+        let ack = conn.recv_message().await?;
+        if ack.msg_type != MessageType::SendStart {
+            return Err(anyhow::anyhow!("Unexpected response: {:?}", ack.msg_type));
+        }
+
+        let receive_path = format!("{}/{}", self.config.replication.snapshot_dir, volume_id);
+
+        // Ensure the receive directory exists
+        tokio::fs::create_dir_all(&self.config.replication.snapshot_dir).await?;
+
+        // Start btrfs receive
+        let mut child = tokio::process::Command::new("btrfs")
+            .args(["receive", &receive_path])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .context("Failed to spawn btrfs receive")?;
+
+        let stdin = child.stdin.take().context("Failed to capture stdin")?;
+        let mut stdin_writer = tokio::io::BufWriter::new(stdin);
+
+        // Receive data chunks and pipe to btrfs receive
+        let mut total_bytes: u64 = 0;
+        loop {
+            match conn.recv_message().await {
+                Ok(data_msg) => match data_msg.msg_type {
+                    MessageType::SendData => {
+                        stdin_writer.write_all(&data_msg.payload).await?;
+                        total_bytes += data_msg.payload.len() as u64;
+                    }
+                    MessageType::SendComplete => {
+                        stdin_writer.shutdown().await?;
+                        break;
+                    }
+                    _ => continue,
+                },
+                Err(e) => {
+                    return Err(anyhow::anyhow!("Connection error during sync: {}", e));
+                }
+            }
+        }
+
+        // Wait for btrfs receive to complete
+        let output = child.wait_with_output().await
+            .context("Failed to wait for btrfs receive")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("btrfs receive failed: {}", stderr));
+        }
+
+        info!("Volume {} synced from peer {} ({} bytes)", volume_id, peer_addr, total_bytes);
+        Ok(())
     }
 }
 
