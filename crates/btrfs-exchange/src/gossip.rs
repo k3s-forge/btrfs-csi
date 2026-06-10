@@ -1,5 +1,8 @@
 use anyhow::Result;
-use btrfs_protocol::message::{HeartbeatPayload, Message, MessageType, NodeInfo};
+use btrfs_protocol::message::{
+    ConflictInfo, EpochInfo, HeartbeatPayload, Message, MessageType, NodeInfo,
+    QuorumVoteRequest, QuorumVoteResponse,
+};
 use btrfs_protocol::transport::TcpTransport;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -12,12 +15,18 @@ use crate::config::ExchangeConfig;
 /// Callback type for node failure events
 pub type NodeFailureCallback = Arc<dyn Fn(String) + Send + Sync>;
 
+/// Callback type for conflict events
+pub type ConflictCallback = Arc<dyn Fn(ConflictInfo) + Send + Sync>;
+
 /// Gossip service for node discovery and state synchronization
 pub struct GossipService {
     config: ExchangeConfig,
     transport: TcpTransport,
     peers: Arc<RwLock<HashMap<String, NodeInfo>>>,
     on_node_failure: Arc<RwLock<Vec<NodeFailureCallback>>>,
+    on_conflict: Arc<RwLock<Vec<ConflictCallback>>>,
+    /// Track epoch/status of volumes known to this node
+    volume_epochs: Arc<RwLock<HashMap<String, EpochInfo>>>,
 }
 
 impl GossipService {
@@ -30,12 +39,19 @@ impl GossipService {
             transport,
             peers: Arc::new(RwLock::new(HashMap::new())),
             on_node_failure: Arc::new(RwLock::new(Vec::new())),
+            on_conflict: Arc::new(RwLock::new(Vec::new())),
+            volume_epochs: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
     /// Register a callback for node failure events
     pub async fn on_node_failure(&self, callback: NodeFailureCallback) {
         self.on_node_failure.write().await.push(callback);
+    }
+
+    /// Register a callback for conflict events
+    pub async fn on_conflict_detected(&self, callback: ConflictCallback) {
+        self.on_conflict.write().await.push(callback);
     }
 
     /// Start the gossip service
@@ -50,9 +66,11 @@ impl GossipService {
         let transport = TcpTransport::new(config.auth_key.as_bytes());
         let peers = self.peers.clone();
         let on_node_failure = self.on_node_failure.clone();
+        let on_conflict = self.on_conflict.clone();
+        let volume_epochs = self.volume_epochs.clone();
 
         tokio::spawn(async move {
-            Self::listener_loop(config, transport, peers, on_node_failure).await;
+            Self::listener_loop(config, transport, peers, on_node_failure, on_conflict, volume_epochs).await;
         });
 
         // Start heartbeat sender
@@ -123,6 +141,8 @@ impl GossipService {
         transport: TcpTransport,
         peers: Arc<RwLock<HashMap<String, NodeInfo>>>,
         on_node_failure: Arc<RwLock<Vec<NodeFailureCallback>>>,
+        on_conflict: Arc<RwLock<Vec<ConflictCallback>>>,
+        volume_epochs: Arc<RwLock<HashMap<String, EpochInfo>>>,
     ) {
         let addr: SocketAddr = match format!("{}:{}", config.listen_addr, config.listen_port).parse() {
             Ok(a) => a,
@@ -151,7 +171,7 @@ impl GossipService {
 
                     tokio::spawn(async move {
                         if let Err(e) = Self::handle_gossip_message(
-                            &config, &mut conn, &peers, &on_node_failure,
+                            &config, &mut conn, &peers, &on_node_failure, &on_conflict, &volume_epochs,
                         ).await {
                             debug!("Gossip message handler error: {}", e);
                         }
@@ -171,6 +191,8 @@ impl GossipService {
         conn: &mut btrfs_protocol::transport::TransportConnection,
         peers: &Arc<RwLock<HashMap<String, NodeInfo>>>,
         on_node_failure: &Arc<RwLock<Vec<NodeFailureCallback>>>,
+        on_conflict: &Arc<RwLock<Vec<ConflictCallback>>>,
+        volume_epochs: &Arc<RwLock<HashMap<String, EpochInfo>>>,
     ) -> anyhow::Result<()> {
         let msg = conn.recv_message().await.map_err(|e| anyhow::anyhow!("{}", e))?;
 
@@ -230,6 +252,69 @@ impl GossipService {
             }
             MessageType::HeartbeatAck => {
                 // No-op, just acknowledge
+            }
+            MessageType::QuorumVote => {
+                let vote_req: QuorumVoteRequest = serde_json::from_slice(&msg.payload)?;
+                debug!(
+                    "Quorum vote request for {} from {} (epoch={})",
+                    vote_req.volume_id, vote_req.requester_node, vote_req.epoch
+                );
+
+                // Check our local epoch info for conflict detection
+                let local = volume_epochs.read().await;
+                let local_info = local.get(&vote_req.volume_id);
+                let (peer_epoch, peer_vc, conflict) = if let Some(info) = local_info {
+                    let local_vc: HashMap<String, u64> = info.vector_clock.iter().cloned().collect();
+                    let req_vc: HashMap<String, u64> = vote_req.vector_clock.iter().cloned().collect();
+                    let has_conflict = btrfs_ops::xattr::has_conflict(&local_vc, &req_vc);
+                    (info.epoch, info.vector_clock.clone(), has_conflict)
+                } else {
+                    // We don't know this volume; vote granted (epoch=0 means clean)
+                    (0u64, vec![], false)
+                };
+                drop(local);
+
+                let response = QuorumVoteResponse {
+                    volume_id: vote_req.volume_id.clone(),
+                    peer_epoch,
+                    peer_vector_clock: peer_vc,
+                    vote_granted: !conflict || peer_epoch == 0,
+                    peer_node: config.node_id.clone(),
+                    conflict,
+                };
+
+                let payload = serde_json::to_vec(&response)?;
+                let ack = Message::new(MessageType::QuorumVoteResponse, payload);
+                conn.send_message(&ack).await.map_err(|e| anyhow::anyhow!("{}", e))?;
+
+                if conflict {
+                    warn!(
+                        "CONFLICT DETECTED for volume {} between {} and local node",
+                        vote_req.volume_id, vote_req.requester_node
+                    );
+                }
+            }
+            MessageType::QuorumVoteResponse => {
+                // Responses are handled synchronously in request_quorum_lease,
+                // but we may receive unsolicited ones; ignore.
+            }
+            MessageType::ConflictDetected => {
+                let conflict_info: ConflictInfo = serde_json::from_slice(&msg.payload)?;
+                error!(
+                    "Volume {} in CONFLICT between {} and {}",
+                    conflict_info.volume_id, conflict_info.node_a, conflict_info.node_b
+                );
+
+                // Update local epoch status to conflict
+                let mut epochs = volume_epochs.write().await;
+                if let Some(info) = epochs.get_mut(&conflict_info.volume_id) {
+                    info.status = "conflict".to_string();
+                }
+
+                let callbacks = on_conflict.read().await;
+                for cb in callbacks.iter() {
+                    cb(conflict_info);
+                }
             }
             _ => {
                 debug!("Unexpected gossip message type: {:?}", msg.msg_type);
@@ -410,6 +495,155 @@ impl GossipService {
             }
         }
     }
+
+    /// Register a volume's epoch info for quorum tracking
+    pub async fn register_volume_epoch(
+        &self,
+        volume_id: &str,
+        epoch: u64,
+        vector_clock: Vec<(String, u64)>,
+        status: &str,
+    ) {
+        let mut epochs = self.volume_epochs.write().await;
+        epochs.insert(volume_id.to_string(), EpochInfo {
+            volume_id: volume_id.to_string(),
+            epoch,
+            vector_clock,
+            status: status.to_string(),
+            last_synced_from: None,
+        });
+    }
+
+    /// Update epoch for a volume after successful sync
+    pub async fn update_volume_epoch(
+        &self,
+        volume_id: &str,
+        epoch: u64,
+        last_synced_from: &str,
+    ) {
+        let mut epochs = self.volume_epochs.write().await;
+        if let Some(info) = epochs.get_mut(volume_id) {
+            info.epoch = epoch;
+            info.last_synced_from = Some(last_synced_from.to_string());
+            info.status = "active".to_string();
+        }
+    }
+
+    /// Request quorum lease from peers to allow write access to a volume.
+    /// Returns true if majority (N/2 + 1) confirm the volume is not conflicted.
+    pub async fn request_quorum_lease(
+        &self,
+        volume_id: &str,
+        epoch: u64,
+        vector_clock: &[(String, u64)],
+    ) -> Result<QuorumLeaseResult> {
+        let peers = self.peers.read().await;
+        let total_peers = peers.len();
+        if total_peers == 0 {
+            // Solo node: always grant
+            return Ok(QuorumLeaseResult {
+                granted: true,
+                votes_received: 1,
+                votes_needed: 1,
+                total_nodes: 1,
+                conflict: false,
+                conflict_info: None,
+            });
+        }
+
+        let required = total_peers / 2 + 1;
+        let mut votes_granted = 1u32; // Self-vote
+        let mut conflict = false;
+        let mut conflict_info: Option<ConflictInfo> = None;
+
+        let vote_req = QuorumVoteRequest {
+            volume_id: volume_id.to_string(),
+            epoch,
+            vector_clock: vector_clock.to_vec(),
+            requester_node: self.config.node_id.clone(),
+        };
+        let payload = serde_json::to_vec(&vote_req)?;
+
+        for (node_id, node_info) in peers.iter() {
+            if *node_id == self.config.node_id {
+                continue;
+            }
+
+            let addr: SocketAddr = match node_info.addr.parse() {
+                Ok(a) => a,
+                Err(_) => continue,
+            };
+
+            if let Ok(mut conn) = self.transport.connect(addr).await {
+                let msg = Message::new(MessageType::QuorumVote, payload.clone());
+                if conn.send_message(&msg).await.is_ok() {
+                    if let Ok(response) = conn.recv_message().await {
+                        if response.msg_type == MessageType::QuorumVoteResponse {
+                            if let Ok(vote) = serde_json::from_slice::<QuorumVoteResponse>(&response.payload) {
+                                if vote.conflict {
+                                    conflict = true;
+                                    conflict_info = Some(ConflictInfo {
+                                        volume_id: volume_id.to_string(),
+                                        node_a: self.config.node_id.clone(),
+                                        node_b: vote.peer_node.clone(),
+                                        epoch_a: epoch,
+                                        epoch_b: vote.peer_epoch,
+                                        vector_clock_a: vector_clock.to_vec(),
+                                        vector_clock_b: vote.peer_vector_clock,
+                                    });
+                                } else if vote.vote_granted {
+                                    votes_granted += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if conflict {
+            // Fire conflict callbacks
+            if let Some(ref ci) = conflict_info {
+                let callbacks = self.on_conflict.read().await;
+                for cb in callbacks.iter() {
+                    cb(ci.clone());
+                }
+            }
+            return Ok(QuorumLeaseResult {
+                granted: false,
+                votes_received: votes_granted,
+                votes_needed: required as u32,
+                total_nodes: (total_peers + 1) as u32,
+                conflict: true,
+                conflict_info,
+            });
+        }
+
+        Ok(QuorumLeaseResult {
+            granted: votes_granted >= required as u32,
+            votes_received: votes_granted,
+            votes_needed: required as u32,
+            total_nodes: (total_peers + 1) as u32,
+            conflict: false,
+            conflict_info: None,
+        })
+    }
+
+    /// Get the quorum status for a volume
+    pub async fn get_volume_epoch_info(&self, volume_id: &str) -> Option<EpochInfo> {
+        self.volume_epochs.read().await.get(volume_id).cloned()
+    }
+}
+
+/// Result of a quorum lease request
+#[derive(Debug, Clone)]
+pub struct QuorumLeaseResult {
+    pub granted: bool,
+    pub votes_received: u32,
+    pub votes_needed: u32,
+    pub total_nodes: u32,
+    pub conflict: bool,
+    pub conflict_info: Option<ConflictInfo>,
 }
 
 /// Get free space for a path using btrfs filesystem usage

@@ -30,37 +30,120 @@ pub enum TransportError {
 /// Result type for transport operations
 pub type Result<T> = std::result::Result<T, TransportError>;
 
-/// XChaCha20-Poly1305 payload encryptor (24-byte nonce, pure ChaCha20, no AES-NI needed)
-struct PayloadCipher {
-    cipher: chacha20poly1305::XChaCha20Poly1305,
+/// Runtime-detected cipher kind for adaptive crypto
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CipherKind {
+    /// AES-256-GCM — hardware accelerated via AES-NI on x86_64
+    Aes256Gcm,
+    /// XChaCha20-Poly1305 — pure software, no hardware acceleration needed
+    XChaCha20,
+}
+
+/// Detect AES-NI support at runtime using CPUID
+fn detect_hardware_aes() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if let Ok(cpuid) = raw_cpuid::CpuId::new() {
+            if let Some(features) = cpuid.get_feature_info() {
+                return features.has_aesni();
+            }
+        }
+        false
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false // ARM etc. use XChaCha20 by default
+    }
+}
+
+/// Adaptive payload cipher: runtime-selected between AES-256-GCM and XChaCha20-Poly1305.
+/// Prepend nonce (12 or 24 bytes) to ciphertext for transmission.
+enum PayloadCipher {
+    Aes256Gcm {
+        cipher: aes_gcm::Aes256Gcm,
+    },
+    XChaCha20 {
+        cipher: chacha20poly1305::XChaCha20Poly1305,
+    },
 }
 
 impl PayloadCipher {
     fn new(raw_key: &[u8]) -> Self {
-        use chacha20poly1305::aead::KeyInit;
-        let key = chacha20poly1305::Key::from_slice(raw_key);
-        Self { cipher: chacha20poly1305::XChaCha20Poly1305::new(key) }
+        if detect_hardware_aes() {
+            tracing::info!("AES-NI detected: using AES-256-GCM (hardware accelerated)");
+            use aes_gcm::KeyInit;
+            let key = aes_gcm::Key::<aes_gcm::Aes256Gcm>::from_slice(raw_key);
+            PayloadCipher::Aes256Gcm {
+                cipher: aes_gcm::Aes256Gcm::new(key),
+            }
+        } else {
+            tracing::info!("No AES-NI: using XChaCha20-Poly1305 (pure software)");
+            use chacha20poly1305::aead::KeyInit;
+            let key = chacha20poly1305::Key::from_slice(raw_key);
+            PayloadCipher::XChaCha20 {
+                cipher: chacha20poly1305::XChaCha20Poly1305::new(key),
+            }
+        }
+    }
+
+    fn kind(&self) -> CipherKind {
+        match self {
+            PayloadCipher::Aes256Gcm { .. } => CipherKind::Aes256Gcm,
+            PayloadCipher::XChaCha20 { .. } => CipherKind::XChaCha20,
+        }
+    }
+
+    fn nonce_len(&self) -> usize {
+        match self {
+            PayloadCipher::Aes256Gcm { .. } => 12,
+            PayloadCipher::XChaCha20 { .. } => 24,
+        }
     }
 
     fn encrypt(&self, plaintext: &[u8]) -> Vec<u8> {
-        use chacha20poly1305::aead::Aead;
-        let nonce_bytes: [u8; 24] = rand::random();
-        let nonce = chacha20poly1305::XNonce::from_slice(&nonce_bytes);
-        let ciphertext = self.cipher.encrypt(nonce, plaintext)
-            .expect("XChaCha20-Poly1305 encryption should not fail");
-        let mut out = Vec::with_capacity(24 + ciphertext.len());
-        out.extend_from_slice(&nonce_bytes);
-        out.extend_from_slice(&ciphertext);
-        out
+        match self {
+            PayloadCipher::Aes256Gcm { cipher } => {
+                use aes_gcm::aead::{Aead, generic_array::GenericArray};
+                let nonce_bytes: [u8; 12] = rand::random();
+                let nonce = GenericArray::from_slice(&nonce_bytes);
+                let ciphertext = cipher.encrypt(nonce, plaintext)
+                    .expect("AES-256-GCM encryption should not fail");
+                let mut out = Vec::with_capacity(12 + ciphertext.len());
+                out.extend_from_slice(&nonce_bytes);
+                out.extend_from_slice(&ciphertext);
+                out
+            }
+            PayloadCipher::XChaCha20 { cipher } => {
+                use chacha20poly1305::aead::Aead;
+                let nonce_bytes: [u8; 24] = rand::random();
+                let nonce = chacha20poly1305::XNonce::from_slice(&nonce_bytes);
+                let ciphertext = cipher.encrypt(nonce, plaintext)
+                    .expect("XChaCha20-Poly1305 encryption should not fail");
+                let mut out = Vec::with_capacity(24 + ciphertext.len());
+                out.extend_from_slice(&nonce_bytes);
+                out.extend_from_slice(&ciphertext);
+                out
+            }
+        }
     }
 
     fn decrypt(&self, data: &[u8]) -> Option<Vec<u8>> {
-        use chacha20poly1305::aead::Aead;
-        if data.len() < 24 + 16 {
+        let nonce_len = self.nonce_len();
+        if data.len() < nonce_len + 16 {
             return None;
         }
-        let nonce = chacha20poly1305::XNonce::from_slice(&data[..24]);
-        self.cipher.decrypt(nonce, &data[24..]).ok()
+        match self {
+            PayloadCipher::Aes256Gcm { cipher } => {
+                use aes_gcm::aead::{Aead, generic_array::GenericArray};
+                let nonce = GenericArray::from_slice(&data[..nonce_len]);
+                cipher.decrypt(nonce, &data[nonce_len..]).ok()
+            }
+            PayloadCipher::XChaCha20 { cipher } => {
+                use chacha20poly1305::aead::Aead;
+                let nonce = chacha20poly1305::XNonce::from_slice(&data[..nonce_len]);
+                cipher.decrypt(nonce, &data[nonce_len..]).ok()
+            }
+        }
     }
 }
 
@@ -218,7 +301,7 @@ impl TransportConnection {
                 let payload = match &self.cipher {
                     Some(cipher) => cipher.decrypt(&wire.payload)
                         .ok_or_else(|| TransportError::Protocol(
-                            "AES-GCM decryption failed".to_string()
+                            "Payload decryption failed".to_string()
                         ))?,
                     None => wire.payload,
                 };

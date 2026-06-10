@@ -3,6 +3,121 @@ use std::collections::HashMap;
 
 const CSI_XATTR_PREFIX: &str = "user.csi.";
 
+/// Epoch/Quorum xattr key names
+pub const XATTR_EPOCH: &str = "epoch";
+pub const XATTR_VECTOR_CLOCK: &str = "vector_clock";
+pub const XATTR_LAST_SYNCED_FROM: &str = "last_synced_from";
+pub const XATTR_VOLUME_STATUS: &str = "volume_status";
+
+/// Volume status values
+pub const VOLUME_STATUS_ACTIVE: &str = "active";
+pub const VOLUME_STATUS_READONLY: &str = "readonly";
+pub const VOLUME_STATUS_CONFLICT: &str = "conflict";
+
+/// Get epoch for a subvolume, returning 0 if not set
+pub async fn get_epoch(path: &str) -> u64 {
+    get_csi_attr(path, XATTR_EPOCH).await
+        .ok().flatten()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+/// Set epoch on a subvolume
+pub async fn set_epoch(path: &str, epoch: u64) -> Result<()> {
+    set_csi_attr(path, XATTR_EPOCH, &epoch.to_string()).await
+}
+
+/// Increment epoch atomically (read + 1 + write)
+pub async fn increment_epoch(path: &str) -> Result<u64> {
+    let current = get_epoch(path).await;
+    let next = current + 1;
+    set_epoch(path, next).await?;
+    Ok(next)
+}
+
+/// Parse vector clock from "node1:3,node2:7" format into HashMap
+pub fn parse_vector_clock(val: &str) -> HashMap<String, u64> {
+    let mut clock = HashMap::new();
+    for pair in val.split(',') {
+        let pair = pair.trim();
+        if let Some((node, epoch)) = pair.split_once(':') {
+            if let Ok(e) = epoch.trim().parse::<u64>() {
+                clock.insert(node.trim().to_string(), e);
+            }
+        }
+    }
+    clock
+}
+
+/// Serialize vector clock HashMap into "node1:3,node2:7" format
+pub fn format_vector_clock(clock: &HashMap<String, u64>) -> String {
+    let mut pairs: Vec<String> = clock.iter()
+        .map(|(k, v)| format!("{}:{}", k, v))
+        .collect();
+    pairs.sort();
+    pairs.join(",")
+}
+
+/// Get vector clock for a subvolume
+pub async fn get_vector_clock(path: &str) -> HashMap<String, u64> {
+    get_csi_attr(path, XATTR_VECTOR_CLOCK).await
+        .ok().flatten()
+        .map(|v| parse_vector_clock(&v))
+        .unwrap_or_default()
+}
+
+/// Set vector clock on a subvolume
+pub async fn set_vector_clock(path: &str, clock: &HashMap<String, u64>) -> Result<()> {
+    set_csi_attr(path, XATTR_VECTOR_CLOCK, &format_vector_clock(clock)).await
+}
+
+/// Merge two vector clocks (take max per-node entry)
+pub fn merge_vector_clocks(
+    local: &HashMap<String, u64>,
+    remote: &HashMap<String, u64>,
+) -> HashMap<String, u64> {
+    let mut merged = local.clone();
+    for (node, epoch) in remote {
+        let entry = merged.entry(node.clone()).or_insert(0);
+        *entry = (*entry).max(*epoch);
+    }
+    merged
+}
+
+/// Detect if two vector clocks have diverged (conflict)
+pub fn has_conflict(
+    local: &HashMap<String, u64>,
+    remote: &HashMap<String, u64>,
+) -> bool {
+    for (node, local_epoch) in local {
+        if let Some(remote_epoch) = remote.get(node) {
+            if *remote_epoch > *local_epoch {
+                return true;
+            }
+        }
+    }
+    for (node, remote_epoch) in remote {
+        if let Some(local_epoch) = local.get(node) {
+            if *local_epoch > *remote_epoch {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Get volume status from xattr
+pub async fn get_volume_status(path: &str) -> String {
+    get_csi_attr(path, XATTR_VOLUME_STATUS).await
+        .ok().flatten()
+        .unwrap_or_else(|| VOLUME_STATUS_ACTIVE.to_string())
+}
+
+/// Set volume status on a subvolume
+pub async fn set_volume_status(path: &str, status: &str) -> Result<()> {
+    set_csi_attr(path, XATTR_VOLUME_STATUS, status).await
+}
+
 /// Set a CSI xattr on a btrfs subvolume path
 pub async fn set_csi_attr(path: &str, key: &str, value: &str) -> Result<()> {
     let full_key = format!("{}{}", CSI_XATTR_PREFIX, key);

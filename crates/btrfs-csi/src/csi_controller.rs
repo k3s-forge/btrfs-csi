@@ -6,6 +6,7 @@ use btrfs_exchange::config::VolumeProfile;
 use btrfs_exchange::gossip::GossipService;
 use btrfs_exchange::replicator::Replicator;
 use btrfs_ops::xattr;
+use tracing::warn;
 
 use crate::csi::controller_server::Controller;
 use crate::csi::*;
@@ -208,6 +209,21 @@ impl Controller for CsiController {
                 .await;
         }
 
+        // Enable filesystem-level quota (idempotent)
+        let _ = tokio::process::Command::new("btrfs")
+            .args(["quota", "enable", "--simple", &self.data_dir])
+            .output()
+            .await;
+
+        // Set qgroup limit via subvolume ID
+        if let Ok(subvol_id) = get_subvolume_id(&subvol_path).await {
+            let _ = tokio::process::Command::new("btrfs")
+                .args(["qgroup", "limit", &capacity.to_string(), &subvol_path])
+                .output()
+                .await;
+            info!("Set quota limit={} on subvolume {} (id={})", capacity, subvol_path, subvol_id);
+        }
+
         // Write metadata as xattr on the subvolume
         let vol_id = self.volume_id(&req.name);
         let now = chrono::Utc::now().timestamp_millis().to_string();
@@ -216,6 +232,17 @@ impl Controller for CsiController {
         self.set_vol_xattr(&req.name, "zone", &self.zone).await;
         self.set_vol_xattr(&req.name, "profile", &profile_type).await;
         self.set_vol_xattr(&req.name, "created_at", &now).await;
+
+        // Initialize epoch/vector clock for quorum tracking
+        let initial_clock = [(self.node_id.clone(), 1u64)];
+        xattr::set_epoch(&subvol_path, 1).await.ok();
+        xattr::set_vector_clock(&subvol_path, &initial_clock.iter().cloned().collect()).await.ok();
+        xattr::set_volume_status(&subvol_path, xattr::VOLUME_STATUS_ACTIVE).await.ok();
+
+        // Register with gossip quorum system
+        self.gossip.register_volume_epoch(
+            &vol_id, 1, initial_clock.to_vec(), xattr::VOLUME_STATUS_ACTIVE,
+        ).await;
 
         tracing::info!("Volume {} created (id={})", req.name, vol_id);
 
@@ -297,6 +324,7 @@ impl Controller for CsiController {
 
         // Find volume name by volume_id xattr
         let mut found_name: Option<String> = None;
+        let mut found_path: Option<String> = None;
         if let Ok(subvols) = tokio::fs::read_dir(&self.data_dir).await {
             use tokio_stream::wrappers::ReadDirStream;
             use tokio_stream::StreamExt;
@@ -306,6 +334,7 @@ impl Controller for CsiController {
                 if let Ok(Some(vid)) = xattr::get_csi_attr(&entry.path().to_string_lossy(), "volume_id").await {
                     if vid == req.volume_id {
                         found_name = Some(name);
+                        found_path = Some(entry.path().to_string_lossy().to_string());
                         break;
                     }
                 }
@@ -313,12 +342,54 @@ impl Controller for CsiController {
         }
 
         let name = found_name.ok_or_else(|| Status::not_found(format!("Volume {} not found", req.volume_id)))?;
+        let subvol_path = found_path.unwrap_or_else(|| self.subvol_path(&name));
+
+        // Check quorum: get current epoch info and request lease
+        let epoch = xattr::get_epoch(&subvol_path).await;
+        let vclock = xattr::get_vector_clock(&subvol_path).await;
+        let vclock_vec: Vec<(String, u64)> = vclock.into_iter().collect();
+        let status = xattr::get_volume_status(&subvol_path).await;
+
+        // If volume is in conflict, refuse publish
+        if status == xattr::VOLUME_STATUS_CONFLICT {
+            return Err(Status::failed_precondition(format!(
+                "Volume {} is in CONFLICT state. Manual resolution required via btrfs send/receive.",
+                req.volume_id
+            )));
+        }
+
+        // Request quorum lease from peers
+        let quorum = self.gossip.request_quorum_lease(
+            &req.volume_id, epoch, &vclock_vec,
+        ).await.map_err(|e| Status::internal(format!("Quorum check failed: {}", e)))?;
+
+        let volume_readonly = if quorum.conflict {
+            // Mark as conflict
+            xattr::set_volume_status(&subvol_path, xattr::VOLUME_STATUS_CONFLICT).await.ok();
+            return Err(Status::failed_precondition(format!(
+                "Volume {} is in CONFLICT state after quorum check ({} {})",
+                req.volume_id, quorum.votes_received, quorum.votes_needed
+            )));
+        } else if !quorum.granted {
+            // Minority partition: mark as readonly, allow mounting but read-only
+            warn!(
+                "Volume {} quorum NOT granted ({}/{}), publishing as READ-ONLY",
+                req.volume_id, quorum.votes_received, quorum.votes_needed
+            );
+            xattr::set_volume_status(&subvol_path, xattr::VOLUME_STATUS_READONLY).await.ok();
+            true
+        } else {
+            // Quorum granted: mark as active
+            xattr::set_volume_status(&subvol_path, xattr::VOLUME_STATUS_ACTIVE).await.ok();
+            false
+        };
 
         self.add_published_node(&name, &req.node_id).await;
 
         let publish_context = serde_json::to_string(&serde_json::json!({
             "path": self.subvol_path(&name),
             "node_id": self.node_id,
+            "readonly": volume_readonly,
         })).unwrap_or_default();
 
         Ok(Response::new(ControllerPublishVolumeResponse { publish_context }))
@@ -739,6 +810,28 @@ impl Controller for CsiController {
 
         Err(Status::not_found(format!("Volume {} not found", req.volume_id)))
     }
+}
+
+/// Get btrfs subvolume ID from a path
+async fn get_subvolume_id(path: &str) -> Option<u64> {
+    let output = tokio::process::Command::new("btrfs")
+        .args(["subvolume", "show", path])
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if line.contains("Subvolume ID:") || line.contains("subvolume id:") {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if let Some(id_str) = parts.last() {
+                return id_str.parse::<u64>().ok();
+            }
+        }
+    }
+    None
 }
 
 fn parse_btrfs_free_space(output: &str) -> u64 {

@@ -1,4 +1,5 @@
 pub mod commands;
+pub mod io_priority;
 pub mod snapshot;
 pub mod subvolume;
 pub mod usage;

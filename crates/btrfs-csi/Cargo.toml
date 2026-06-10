@@ -31,5 +31,8 @@ tokio-stream.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 
+# System calls (idmapped mounts, I/O priority)
+libc.workspace = true
+
 [build-dependencies]
 tonic-build.workspace = true

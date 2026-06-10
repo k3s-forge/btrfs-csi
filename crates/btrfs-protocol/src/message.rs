@@ -47,6 +47,11 @@ pub enum MessageType {
     StateSyncAck = 0x0501,
     VolumeList = 0x0502,
     VolumeListAck = 0x0503,
+
+    // Quorum lease
+    QuorumVote = 0x0600,
+    QuorumVoteResponse = 0x0601,
+    ConflictDetected = 0x0602,
 }
 
 /// Network message format
@@ -154,6 +159,9 @@ impl Message {
             0x0501 => MessageType::StateSyncAck,
             0x0502 => MessageType::VolumeList,
             0x0503 => MessageType::VolumeListAck,
+            0x0600 => MessageType::QuorumVote,
+            0x0601 => MessageType::QuorumVoteResponse,
+            0x0602 => MessageType::ConflictDetected,
             _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "Unknown message type")),
         };
 
@@ -234,4 +242,44 @@ pub struct SendCompleteResponse {
     pub success: bool,
     pub error: Option<String>,
     pub checksum: Option<String>,
+}
+
+// Quorum lease message types
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuorumVoteRequest {
+    pub volume_id: String,
+    pub epoch: u64,
+    pub vector_clock: Vec<(String, u64)>,
+    pub requester_node: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuorumVoteResponse {
+    pub volume_id: String,
+    pub peer_epoch: u64,
+    pub peer_vector_clock: Vec<(String, u64)>,
+    pub vote_granted: bool,
+    pub peer_node: String,
+    pub conflict: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConflictInfo {
+    pub volume_id: String,
+    pub node_a: String,
+    pub node_b: String,
+    pub epoch_a: u64,
+    pub epoch_b: u64,
+    pub vector_clock_a: Vec<(String, u64)>,
+    pub vector_clock_b: Vec<(String, u64)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EpochInfo {
+    pub volume_id: String,
+    pub epoch: u64,
+    pub vector_clock: Vec<(String, u64)>,
+    pub status: String,
+    pub last_synced_from: Option<String>,
 }

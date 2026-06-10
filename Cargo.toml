@@ -75,3 +75,9 @@ futures = "0.3"
 
 # Tokio streams (for gRPC streaming)
 tokio-stream = { version = "0.1", features = ["net", "fs"] }
+
+# System calls (for idmapped mounts, I/O priority)
+libc = "0.2"
+
+# CPU feature detection (for adaptive crypto)
+raw-cpuid = "11.0"
