@@ -168,6 +168,8 @@ impl GossipService {
                     let config = config.clone();
                     let peers = peers.clone();
                     let on_node_failure = on_node_failure.clone();
+                    let on_conflict = on_conflict.clone();
+                    let volume_epochs = volume_epochs.clone();
 
                     tokio::spawn(async move {
                         if let Err(e) = Self::handle_gossip_message(
@@ -313,7 +315,7 @@ impl GossipService {
 
                 let callbacks = on_conflict.read().await;
                 for cb in callbacks.iter() {
-                    cb(conflict_info);
+                    cb(conflict_info.clone());
                 }
             }
             _ => {

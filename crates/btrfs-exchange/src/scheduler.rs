@@ -149,9 +149,6 @@ impl ReplicaScheduler {
         let targets = Self::find_fragmented_block_groups(data_dir).await;
 
         for (dusage, musage) in &targets {
-            let mut args = vec!["balance", "start", "-dusage", &dusage.to_string(), "-musage", &musage.to_string(), data_dir];
-            let _ = &args;
-
             info!("Targeted balance: -dusage={} -musage={}", dusage, musage);
             let output = tokio::process::Command::new("btrfs")
                 .args([
