@@ -309,6 +309,18 @@ impl Controller for CsiController {
             )));
         }
 
+        // Notify all peers to delete their replica copies
+        let notified = self.gossip.notify_volume_delete(&req.volume_id).await;
+        info!("Notified {} peers to delete replicas of volume {}", notified, req.volume_id);
+
+        // Unregister from replicator
+        let _ = self.replicator.unregister_volume(&req.volume_id).await;
+
+        // Clean up local snapshot/replica data
+        let snap_path = format!("{}/{}", self.config.replication.snapshot_dir, req.volume_id);
+        let _ = tokio::fs::remove_dir_all(&snap_path).await;
+
+        // Delete the subvolume
         let subvol_path = self.subvol_path(&name);
         let output = tokio::process::Command::new("btrfs")
             .args(["subvolume", "delete", &subvol_path])
@@ -321,7 +333,7 @@ impl Controller for CsiController {
                 tracing::error!("Failed to delete subvolume {}: {}", name, stderr);
             }
             Err(e) => tracing::error!("Failed to execute btrfs delete: {}", e),
-            _ => {}
+            _ => info!("Volume {} deleted successfully", req.volume_id),
         }
 
         Ok(Response::new(DeleteVolumeResponse {}))

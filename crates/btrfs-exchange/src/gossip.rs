@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use btrfs_protocol::message::{
-    ConflictInfo, EpochInfo, HeartbeatPayload, Message, MessageType, NodeInfo,
-    QuorumVoteRequest, QuorumVoteResponse,
+    ConflictInfo, DeleteVolumeRequest, EpochInfo, HeartbeatPayload, Message, MessageType,
+    NodeInfo, QuorumVoteRequest, QuorumVoteResponse,
 };
 use btrfs_protocol::transport::TcpTransport;
 use std::collections::HashMap;
@@ -329,6 +329,22 @@ impl GossipService {
                 for cb in callbacks.iter() {
                     cb(conflict_info.clone());
                 }
+            }
+            MessageType::DeleteVolume => {
+                let del_req: DeleteVolumeRequest = serde_json::from_slice(&msg.payload)?;
+                info!("Received volume delete notification for {}", del_req.volume_id);
+
+                // Remove from volume epoch tracking
+                volume_epochs.write().await.remove(&del_req.volume_id);
+
+                // Delete received replica data from snapshot_dir
+                let snap_dir = format!("{}/{}", config.replication.snapshot_dir, del_req.volume_id);
+                let _ = tokio::fs::remove_dir_all(&snap_dir).await;
+                info!("Cleaned up replica data for {} at {}", del_req.volume_id, snap_dir);
+
+                // Send acknowledgment
+                let ack = Message::new(MessageType::DeleteVolumeAck, vec![]);
+                let _ = conn.send_message(&ack).await;
             }
             _ => {
                 debug!("Unexpected gossip message type: {:?}", msg.msg_type);
@@ -663,6 +679,32 @@ impl GossipService {
                 }
             }
         }
+    }
+
+    /// Notify all peers to delete their replica data for a volume
+    pub async fn notify_volume_delete(&self, volume_id: &str) -> usize {
+        info!("Notifying peers to delete volume: {}", volume_id);
+        let del_req = DeleteVolumeRequest {
+            volume_id: volume_id.to_string(),
+        };
+        let payload = serde_json::to_vec(&del_req).unwrap_or_default();
+        let msg = Message::new(MessageType::DeleteVolume, payload);
+
+        let peers = self.peers.read().await.clone();
+        let mut notified = 0usize;
+        for (peer_id, peer_info) in &peers {
+            if *peer_id == self.config.node_id {
+                continue;
+            }
+            if let Ok(addr) = peer_info.addr.parse::<SocketAddr>() {
+                if let Ok(mut conn) = self.transport.connect(addr).await {
+                    let _ = conn.send_message(&msg).await;
+                    notified += 1;
+                }
+            }
+        }
+        info!("Notified {} peers about volume delete: {}", notified, volume_id);
+        notified
     }
 }
 
