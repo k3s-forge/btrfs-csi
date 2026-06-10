@@ -47,7 +47,7 @@ impl GossipService {
             self.config.listen_addr, self.config.listen_port
         );
 
-        // Start TCP listener for incoming gossip messages
+        // Start heartbeat sender
         let config = self.config.clone();
         let transport = TcpTransport::new(config.auth_key.as_bytes());
         let peers = self.peers.clone();
@@ -410,6 +410,8 @@ impl GossipService {
         }
 
         selected
+    }
+
     /// Send NodeLeave to all peers
     pub async fn leave_cluster(&self) {
         let payload = serde_json::to_vec(&self.create_heartbeat_payload()).unwrap_or_default();

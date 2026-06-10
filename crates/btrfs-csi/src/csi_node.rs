@@ -33,6 +33,11 @@ impl Node for CsiNode {
             .map_err(|e| Status::internal(format!("Failed to create staging dir: {}", e)))?;
 
         let volume_path = extract_volume_path(&req.volume_context, &self.data_dir);
+        if volume_path.is_empty() {
+            return Err(Status::invalid_argument(
+                "volume_context must contain 'path' or 'volume_name' for staging"
+            ));
+        }
 
         let output = tokio::process::Command::new("mount")
             .args(["--bind", &volume_path, req.staging_target_path.as_str()])
@@ -77,6 +82,11 @@ impl Node for CsiNode {
             .map_err(|e| Status::internal(format!("Failed to create target dir: {}", e)))?;
 
         let volume_path = extract_volume_path(&req.volume_context, &self.data_dir);
+        if volume_path.is_empty() {
+            return Err(Status::invalid_argument(
+                "volume_context must contain 'path' or 'volume_name' for staging"
+            ));
+        }
 
         let output = tokio::process::Command::new("mount")
             .args(["--bind", &volume_path, req.target_path.as_str()])
@@ -211,7 +221,7 @@ fn extract_volume_path(volume_context: &HashMap<String, String>, data_dir: &str)
     if let Some(name) = volume_context.get("volume_name") {
         return format!("{}/{}", data_dir, name);
     }
-    data_dir.to_string()
+    String::new()
 }
 
 fn parse_btrfs_usage(output: &str) -> (u64, u64) {

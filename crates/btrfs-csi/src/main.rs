@@ -155,6 +155,9 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Keep a copy of gossip for graceful shutdown
+    let shutdown_gossip = gossip.clone();
+
     // Create and start gRPC server
     let server = CsiGrpcServer::new(
         args.endpoint,
@@ -210,7 +213,7 @@ async fn main() -> Result<()> {
 
             // Notify peers we're leaving
             info!("Sending NodeLeave to peers...");
-            gossip.leave_cluster().await;
+            shutdown_gossip.leave_cluster().await;
 
             // Give in-flight RPCs time to complete
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
