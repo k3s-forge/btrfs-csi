@@ -98,6 +98,7 @@ impl ReplicationReceiver {
         let mut total_bytes: u64 = 0;
         let mut chunk_count: u64 = 0;
         let mut hasher = blake3::Hasher::new();
+        let mut sender_checksum: Option<String> = None;
 
         loop {
             match conn.recv_message().await {
@@ -116,8 +117,7 @@ impl ReplicationReceiver {
                         }
                     }
                     MessageType::SendComplete => {
-                        // Extract sender's checksum from the completion message
-                        let sender_checksum: Option<String> = serde_json::from_slice(&msg.payload)
+                        sender_checksum = serde_json::from_slice(&msg.payload)
                             .ok()
                             .and_then(|r: SendCompleteResponse| r.checksum);
 
