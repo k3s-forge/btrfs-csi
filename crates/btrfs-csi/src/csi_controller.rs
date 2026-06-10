@@ -6,7 +6,7 @@ use btrfs_exchange::config::VolumeProfile;
 use btrfs_exchange::gossip::GossipService;
 use btrfs_exchange::replicator::Replicator;
 use btrfs_ops::xattr;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::csi::controller_server::Controller;
 use crate::csi::*;
