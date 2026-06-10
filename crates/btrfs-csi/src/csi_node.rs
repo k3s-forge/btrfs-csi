@@ -145,12 +145,27 @@ impl Node for CsiNode {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let (total, used) = parse_btrfs_usage(&stdout);
 
+        // Also query inode usage via df -i
+        let inode_output = tokio::process::Command::new("df")
+            .args(["-i", &self.data_dir])
+            .output()
+            .await
+            .unwrap_or_else(|_| std::process::Output::default());
+        let (total_inodes, used_inodes) = parse_inode_usage(&String::from_utf8_lossy(&inode_output.stdout));
+
         Ok(Response::new(NodeGetVolumeStatsResponse {
             usage: Some(ngvsr::VolumeUsage {
                 available: (total - used) as i64,
                 total: total as i64,
                 used: used as i64,
                 unit: ngvsr::volume_usage::Unit::Bytes.into(),
+            }),
+            volume_attributes: Some(ngvsr::VolumeAttributes {
+                attributes: [
+                    ("inode_total".to_string(), total_inodes.to_string()),
+                    ("inode_used".to_string(), used_inodes.to_string()),
+                    ("inode_available".to_string(), (total_inodes.saturating_sub(used_inodes)).to_string()),
+                ].into_iter().collect(),
             }),
             ..Default::default()
         }))
@@ -239,4 +254,17 @@ fn parse_btrfs_usage(output: &str) -> (u64, u64) {
         }
     }
     (total, used)
+}
+
+fn parse_inode_usage(output: &str) -> (u64, u64) {
+    // Parse df -i output: Filesystem Inodes IUsed IFree IUse% MountedOn
+    for line in output.lines().skip(1) {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 4 {
+            if let (Ok(total), Ok(used)) = (parts[1].parse::<u64>(), parts[2].parse::<u64>()) {
+                return (total, used);
+            }
+        }
+    }
+    (0, 0)
 }

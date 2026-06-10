@@ -49,6 +49,8 @@ pub struct CsiController {
     volumes: Arc<RwLock<HashMap<String, VolInfo>>>,
     snapshots: Arc<RwLock<HashMap<String, SnapInfo>>>,
     volume_profiles: HashMap<String, VolumeProfile>,
+    /// Track which nodes have which volumes published: volume_id -> set of node_ids
+    published_nodes: Arc<RwLock<HashMap<String, Vec<String>>>>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -87,6 +89,7 @@ impl CsiController {
             replicator,
             volumes: Arc::new(RwLock::new(HashMap::new())),
             snapshots: Arc::new(RwLock::new(HashMap::new())),
+            published_nodes: Arc::new(RwLock::new(HashMap::new())),
             volume_profiles,
         }
     }
@@ -305,6 +308,20 @@ impl Controller for CsiController {
         let req = request.into_inner();
         tracing::info!("CSI DeleteVolume: {}", req.volume_id);
 
+        // Check if volume is still published on any node
+        {
+            let published = self.published_nodes.read().await;
+            if let Some(nodes) = published.get(&req.volume_id) {
+                if !nodes.is_empty() {
+                    return Err(Status::failed_precondition(format!(
+                        "Volume {} is still published on nodes: {}",
+                        req.volume_id,
+                        nodes.join(", ")
+                    )));
+                }
+            }
+        }
+
         let vol = {
             let volumes = self.volumes.read().await;
             volumes.get(&req.volume_id).cloned()
@@ -354,6 +371,15 @@ impl Controller for CsiController {
             volumes.get(&req.volume_id).cloned()
         }.ok_or_else(|| Status::not_found(format!("Volume {} not found", req.volume_id)))?;
 
+        // Track publish state
+        {
+            let mut published = self.published_nodes.write().await;
+            let nodes = published.entry(req.volume_id.clone()).or_insert_with(Vec::new);
+            if !nodes.contains(&req.node_id) {
+                nodes.push(req.node_id.clone());
+            }
+        }
+
         let publish_context = serde_json::to_string(&serde_json::json!({
             "path": format!("{}/{}", self.data_dir, vol.name),
             "node_id": self.node_id,
@@ -368,6 +394,15 @@ impl Controller for CsiController {
     ) -> Result<Response<ControllerUnpublishVolumeResponse>, Status> {
         let req = request.into_inner();
         tracing::info!("CSI ControllerUnpublishVolume: volume_id={}, node_id={}", req.volume_id, req.node_id);
+
+        // Remove publish state
+        {
+            let mut published = self.published_nodes.write().await;
+            if let Some(nodes) = published.get_mut(&req.volume_id) {
+                nodes.retain(|n| n != &req.node_id);
+            }
+        }
+
         Ok(Response::new(ControllerUnpublishVolumeResponse {}))
     }
 
@@ -431,8 +466,22 @@ impl Controller for CsiController {
 
     async fn get_capacity(
         &self,
-        _request: Request<GetCapacityRequest>,
+        request: Request<GetCapacityRequest>,
     ) -> Result<Response<GetCapacityResponse>, Status> {
+        let req = request.into_inner();
+
+        // If topology requirement specifies a zone, only report capacity if we match
+        if let Some(topo_req) = req.topology_requirement.as_ref() {
+            let segments = &topo_req.requisite;
+            let zone_matches = segments.iter().any(|t| {
+                t.segments.get("topology.btrfs-csi/zone").map(|z| z == &self.zone).unwrap_or(false)
+            });
+            if !zone_matches && !segments.is_empty() {
+                // This node doesn't match the required topology
+                return Ok(Response::new(GetCapacityResponse { available_capacity: 0 }));
+            }
+        }
+
         let output = tokio::process::Command::new("btrfs")
             .args(["filesystem", "usage", "-b", &self.data_dir])
             .output()
@@ -530,10 +579,19 @@ impl Controller for CsiController {
         }.ok_or_else(|| Status::not_found(format!("Snapshot {} not found", req.snapshot_id)))?;
 
         let snap_path = format!("{}/{}", self.data_dir, snap.name);
-        let _ = tokio::process::Command::new("btrfs")
+        let output = tokio::process::Command::new("btrfs")
             .args(["subvolume", "delete", &snap_path])
             .output()
             .await;
+
+        match output {
+            Ok(o) if !o.status.success() => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                tracing::error!("Failed to delete snapshot subvolume {}: {}", snap.name, stderr);
+            }
+            Err(e) => tracing::error!("Failed to execute btrfs delete for snapshot {}: {}", snap.name, e),
+            _ => {}
+        }
 
         self.snapshots.write().await.remove(&req.snapshot_id);
 
@@ -546,11 +604,29 @@ impl Controller for CsiController {
 
     async fn list_snapshots(
         &self,
-        _request: Request<ListSnapshotsRequest>,
+        request: Request<ListSnapshotsRequest>,
     ) -> Result<Response<ListSnapshotsResponse>, Status> {
+        let req = request.into_inner();
+
         let snapshots = self.snapshots.read().await;
-        let entries: Vec<list_snapshots_response::Entry> = snapshots.values().map(|s| {
-            list_snapshots_response::Entry {
+        let mut entries: Vec<list_snapshots_response::Entry>;
+
+        // Filter by source_volume_id if provided
+        if !req.source_volume_id.is_empty() {
+            entries = snapshots.values()
+                .filter(|s| s.source_volume_id == req.source_volume_id)
+                .map(|s| list_snapshots_response::Entry {
+                    snapshot: Some(Snapshot {
+                        snapshot_id: s.id.clone(),
+                        source_volume_id: s.source_volume_id.clone(),
+                        creation_time: s.creation_time,
+                        size_bytes: s.size as i64,
+                        ..Default::default()
+                    }),
+                })
+                .collect();
+        } else {
+            entries = snapshots.values().map(|s| list_snapshots_response::Entry {
                 snapshot: Some(Snapshot {
                     snapshot_id: s.id.clone(),
                     source_volume_id: s.source_volume_id.clone(),
@@ -558,10 +634,20 @@ impl Controller for CsiController {
                     size_bytes: s.size as i64,
                     ..Default::default()
                 }),
-            }
-        }).collect();
+            }).collect();
+        }
 
-        Ok(Response::new(ListSnapshotsResponse { entries, next_token: String::new() }))
+        // Pagination
+        let start = req.starting_token.parse::<usize>().unwrap_or(0);
+        let max = req.max_entries as usize;
+
+        if max > 0 && entries.len() > start + max {
+            entries = entries.into_iter().skip(start).take(max).collect();
+            Ok(Response::new(ListSnapshotsResponse { entries, next_token: (start + max).to_string() }))
+        } else {
+            if start > 0 { entries = entries.into_iter().skip(start).collect(); }
+            Ok(Response::new(ListSnapshotsResponse { entries, next_token: String::new() }))
+        }
     }
 
     async fn controller_expand_volume(
